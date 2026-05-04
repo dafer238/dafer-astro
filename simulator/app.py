@@ -2,6 +2,7 @@ import dearpygui.dearpygui as dpg
 import numpy as np
 import time
 import os
+import json
 
 from simulator.ui.theme import create_theme, create_button_themes
 from simulator.render.viewport3d import Viewport3D
@@ -47,6 +48,7 @@ class App:
         self._console_lines: list[str] = []
         self._maneuver_plan: list[ManeuverEvent] = []
         self._active_sc_name: str | None = None
+        self._current_file_path: str | None = None
         self._left_panel_width = 280
         self._right_panel_width = 300
         self._bottom_panel_height = 140
@@ -71,6 +73,10 @@ class App:
         dpg.setup_dearpygui()
         dpg.show_viewport()
 
+        # Key handler for Escape to clear burn preview
+        with dpg.handler_registry():
+            dpg.add_key_release_handler(key=dpg.mvKey_Escape, callback=self._on_escape)
+
         self.last_frame_time = time.time()
         self._log("Simulator ready. Set orbital parameters and click [Compute].")
 
@@ -90,6 +96,22 @@ class App:
             no_scrollbar=True,
             no_scroll_with_mouse=True,
         ):
+            with dpg.menu_bar():
+                with dpg.menu(label="File"):
+                    dpg.add_menu_item(label="New", callback=self._file_new)
+                    dpg.add_separator()
+                    dpg.add_menu_item(label="Open...", callback=self._file_open)
+                    dpg.add_separator()
+                    dpg.add_menu_item(label="Save", callback=self._file_save)
+                    dpg.add_menu_item(label="Save As...", callback=self._file_save_as)
+                    dpg.add_separator()
+                    dpg.add_menu_item(label="Exit", callback=self._file_exit)
+                with dpg.menu(label="Edit"):
+                    dpg.add_menu_item(label="Clear All Burns", callback=self._clear_burns)
+                    dpg.add_menu_item(label="Clear Preview", callback=self._clear_preview_only)
+                with dpg.menu(label="About"):
+                    dpg.add_menu_item(label="About Orbital Simulator", callback=self._show_about)
+
             with dpg.tab_bar(tag="main_tab_bar", callback=self._on_tab_change):
                 with dpg.tab(label="Orbital / Rendezvous", tag="tab_orbital"):
                     with dpg.child_window(tag="top_panel", border=False, no_scrollbar=True):
@@ -623,6 +645,7 @@ class App:
                     for sc in self._tab1_spacecraft:
                         if sc["name"] == active_name:
                             sc["trajectory"] = result
+                            sc["burn_events"] = list(self.engine.burn_events)
                             break
                 # Rebuild all multi-trajectories with latest data
                 self._refresh_all_multi_trajectories()
@@ -632,6 +655,10 @@ class App:
                 # Now compute closest approach (after storing burn trajectory)
                 if self._tab1_multi_result is not None:
                     self._compute_closest_approach_deferred()
+                # Fit view after load
+                if getattr(self, "_fit_after_compute", False):
+                    self._fit_after_compute = False
+                    self._fit_view()
             elif self.engine.error:
                 self._log(f"ERROR: {self.engine.error}")
 
@@ -827,6 +854,24 @@ class App:
                     self._update_telemetry()
                     self._update_plots()
                     self._update_time_display()
+                # Restore burn events display for this SC
+                burn_events = sc.get("burn_events", [])
+                self._update_burn_events_display(burn_events)
+                if burn_events:
+                    burn_points = np.array([ev["r"] for ev in burn_events])
+                    self.viewport3d.set_burn_markers(burn_points)
+                else:
+                    self.viewport3d.clear_burn_markers()
+                # Clear compare data for this SC
+                self.compare_trajectory = None
+                if self.viewport3d:
+                    self.viewport3d.set_reference_trajectory(None)
+                self._update_compare_metrics()
+                # Clear burn preview
+                self._preview_enabled = False
+                if self.viewport3d:
+                    self.viewport3d.clear_preview_trajectory()
+                    self.viewport3d.set_burn_cursor(None)
                 # Set satellite color
                 self.viewport3d.set_satellite_color(sc["color"])
                 # Highlight in viewport
@@ -1211,6 +1256,10 @@ class App:
         # Update burn cursor if anchor is "At current time"
         if dpg.does_item_exist("burn_anchor") and str(dpg.get_value("burn_anchor")) == "At current time":
             self._update_burn_cursor()
+            # Also update burn preview if dv > 0
+            dv = float(dpg.get_value("burn_dv")) if dpg.does_item_exist("burn_dv") else 0.0
+            if dv > 0:
+                self._on_burn_param_change()
 
     def _on_speed_change(self, sender, app_data):
         speed_map = {
@@ -1744,6 +1793,8 @@ class App:
         self._log(
             f"Added burn: t={t_frac * 100.0:.1f}% ({anchor}) dv={dv:.3f} km/s dir={direction}"
         )
+        # Auto-compute to show result
+        self._on_compute()
 
     def _update_burn_cursor(self, sender=None, app_data=None):
         """Update the burn cursor marker on the 3D viewport."""
@@ -1752,6 +1803,30 @@ class App:
         try:
             anchor = str(dpg.get_value("burn_anchor"))
             direction = str(dpg.get_value("burn_dir"))
+
+            # For "At current time", use exact trajectory position to match SC dot
+            if anchor == "At current time" and self.trajectory is not None and len(self.trajectory.t) > 0:
+                idx = int(np.searchsorted(self.trajectory.t, self.current_time))
+                idx = min(idx, len(self.trajectory.r) - 1)
+                r_vec = np.array(self.trajectory.r[idx])
+                v_vec = np.array(self.trajectory.v[idx])
+                pos = r_vec
+                # Compute direction vector for arrow
+                r_hat = r_vec / np.linalg.norm(r_vec)
+                v_hat = v_vec / np.linalg.norm(v_vec)
+                h_vec = np.cross(r_vec, v_vec)
+                h_hat = h_vec / np.linalg.norm(h_vec)
+                dir_map = {
+                    "prograde": v_hat,
+                    "retrograde": -v_hat,
+                    "normal": h_hat,
+                    "antinormal": -h_hat,
+                    "radial_out": r_hat,
+                    "radial_in": -r_hat,
+                }
+                dir_vec = dir_map.get(direction, v_hat)
+                self.viewport3d.set_burn_cursor(pos, dir_vec)
+                return
 
             t_frac = self._get_burn_time_frac(anchor)
 
@@ -1886,6 +1961,10 @@ class App:
         self.viewport3d.clear_transfers()
         self.viewport3d.set_burn_cursor(None)
         self._log("Cleared preview overlays.")
+
+    def _on_escape(self, sender=None, app_data=None):
+        """Escape key: clear burn preview."""
+        self._clear_preview_only()
 
     def _fit_view(self):
         if self.viewport3d:
@@ -2333,6 +2412,219 @@ class App:
             f"Total Δv: {dv1 + dv2:.4f} km/s",
         )
         self._log(f"Rendezvous: Hohmann to {target_alt:.0f} km")
+
+    # ─── File Menu ─────────────────────────────────────────────────────────
+
+    def _file_new(self):
+        """Reset to empty project, with save prompt if needed."""
+        if self._tab1_spacecraft:
+            self._pending_action = "new"
+            self._show_save_prompt()
+            return
+        self._do_file_new()
+
+    def _show_save_prompt(self):
+        """Show a modal asking to save before destructive action."""
+        if dpg.does_item_exist("save_prompt_window"):
+            dpg.delete_item("save_prompt_window")
+        with dpg.window(label="Save Changes?", tag="save_prompt_window", modal=True, width=320, height=120, no_resize=True):
+            dpg.add_text("You have unsaved changes. Save before continuing?")
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Save", callback=self._save_prompt_save, width=80)
+                dpg.add_button(label="Don't Save", callback=self._save_prompt_discard, width=100)
+                dpg.add_button(label="Cancel", callback=self._save_prompt_cancel, width=80)
+
+    def _save_prompt_save(self):
+        dpg.delete_item("save_prompt_window")
+        self._file_save()
+        self._execute_pending_action()
+
+    def _save_prompt_discard(self):
+        dpg.delete_item("save_prompt_window")
+        self._execute_pending_action()
+
+    def _save_prompt_cancel(self):
+        dpg.delete_item("save_prompt_window")
+        self._pending_action = None
+
+    def _execute_pending_action(self):
+        action = getattr(self, "_pending_action", None)
+        self._pending_action = None
+        if action == "new":
+            self._do_file_new()
+        elif action == "open":
+            self._do_file_open()
+
+    def _do_file_new(self):
+        """Reset to empty project."""
+        self._tab1_spacecraft.clear()
+        self._maneuver_plan.clear()
+        self.trajectory = None
+        self.compare_trajectory = None
+        self._tab1_multi_result = None
+        self._active_sc_name = None
+        self._current_file_path = None
+        if self.viewport3d:
+            self.viewport3d.set_multi_trajectories([])
+            self.viewport3d.clear_burn_markers()
+            self.viewport3d.clear_preview_trajectory()
+            self.viewport3d.clear_preview_orbit()
+            self.viewport3d.set_burn_cursor(None)
+            self.viewport3d.set_reference_trajectory(None)
+            self.viewport3d.clear_closest_approach_line()
+            self.viewport3d.clear_orbit_paths()
+            self.viewport3d._orbit_points = None
+            self.viewport3d._trajectory = None
+            self.viewport3d._selected_orbit = None
+            self.viewport3d._needs_redraw = True
+        self._refresh_burn_plan_display()
+        self._update_burn_events_display([])
+        dpg.configure_item("active_sc_select", items=[])
+        dpg.set_value("active_sc_select", "")
+        dpg.set_value("time_slider", 0.0)
+        self.current_time = 0.0
+        self._update_compare_metrics()
+        # Clear telemetry
+        for tag in ("tel_alt", "tel_vel", "tel_period", "tel_energy", "tel_a", "tel_e", "tel_i", "tel_raan", "tel_omega", "tel_theta"):
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, "—")
+        # Clear 2D plots
+        for tag in ("alt_series", "vel_series", "alt_cursor", "vel_cursor"):
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
+        for ax in ("alt_x", "alt_y", "vel_x", "vel_y"):
+            if dpg.does_item_exist(ax):
+                dpg.fit_axis_data(ax)
+        self._log("New project created.")
+
+    def _file_open(self):
+        """Open a project file."""
+        if self._tab1_spacecraft:
+            self._pending_action = "open"
+            self._show_save_prompt()
+            return
+        self._do_file_open()
+
+    def _do_file_open(self):
+        dpg.add_file_dialog(
+            label="Open Project",
+            callback=self._file_open_callback,
+            cancel_callback=lambda *a: None,
+            width=600,
+            height=400,
+            default_path=os.getcwd(),
+            modal=True,
+        )
+        dpg.add_file_extension(".json", parent=dpg.last_container())
+
+    def _file_open_callback(self, sender, app_data):
+        file_path = app_data.get("file_path_name", "")
+        if not file_path:
+            return
+        try:
+            with open(file_path, "r") as f:
+                data = json.load(f)
+            self._load_project_data(data)
+            self._current_file_path = file_path
+            self._log(f"Loaded: {os.path.basename(file_path)}")
+        except Exception as ex:
+            self._log(f"Load error: {ex}")
+
+    def _file_save(self):
+        """Save to current file, or Save As if no file yet."""
+        if getattr(self, "_current_file_path", None):
+            self._save_to_file(self._current_file_path)
+        else:
+            self._file_save_as()
+
+    def _file_save_as(self):
+        """Save project to a new file."""
+        dpg.add_file_dialog(
+            label="Save Project As",
+            callback=self._file_save_as_callback,
+            cancel_callback=lambda *a: None,
+            width=600,
+            height=400,
+            default_path=os.getcwd(),
+            modal=True,
+            directory_selector=False,
+        )
+        dpg.add_file_extension(".json", parent=dpg.last_container())
+
+    def _file_save_as_callback(self, sender, app_data):
+        file_path = app_data.get("file_path_name", "")
+        if not file_path:
+            return
+        if not file_path.endswith(".json"):
+            file_path += ".json"
+        self._save_to_file(file_path)
+        self._current_file_path = file_path
+
+    def _save_to_file(self, file_path: str):
+        """Serialize project state to JSON."""
+        data = {
+            "central_body": dpg.get_value("central_body_select") if dpg.does_item_exist("central_body_select") else "Earth",
+            "spacecraft": [],
+        }
+        for sc in self._tab1_spacecraft:
+            coe = sc["coe"]
+            sc_data = {
+                "name": sc["name"],
+                "color": list(sc["color"]),
+                "coe": {"a": coe.a, "e": coe.e, "i": coe.i, "raan": coe.raan, "omega": coe.omega, "theta": coe.theta},
+                "maneuvers": [
+                    {"time": m.time, "dv_magnitude": m.dv_magnitude, "direction": m.direction}
+                    for m in sc.get("maneuvers", [])
+                ],
+            }
+            data["spacecraft"].append(sc_data)
+        try:
+            with open(file_path, "w") as f:
+                json.dump(data, f, indent=2)
+            self._log(f"Saved: {os.path.basename(file_path)}")
+        except Exception as ex:
+            self._log(f"Save error: {ex}")
+
+    def _load_project_data(self, data: dict):
+        """Load project from parsed JSON data."""
+        self._file_new()
+        if "central_body" in data and dpg.does_item_exist("central_body_select"):
+            dpg.set_value("central_body_select", data["central_body"])
+        for sc_data in data.get("spacecraft", []):
+            name = sc_data["name"]
+            color = tuple(sc_data.get("color", [0, 191, 255]))
+            coe_d = sc_data["coe"]
+            coe = OrbitalElements(
+                a=coe_d["a"], e=coe_d["e"], i=coe_d["i"],
+                raan=coe_d["raan"], omega=coe_d["omega"], theta=coe_d["theta"],
+            )
+            maneuvers = [
+                ManeuverEvent(time=m["time"], dv_magnitude=m["dv_magnitude"], direction=m["direction"])
+                for m in sc_data.get("maneuvers", [])
+            ]
+            sc = {"name": name, "color": color, "coe": coe, "maneuvers": maneuvers, "trajectory": None, "burn_events": []}
+            self._tab1_spacecraft.append(sc)
+        # Update UI
+        names = [sc["name"] for sc in self._tab1_spacecraft]
+        dpg.configure_item("active_sc_select", items=names)
+        if names:
+            dpg.set_value("active_sc_select", names[0])
+            self._select_sc_by_name(names[0])
+            self._fit_after_compute = True
+            self._on_compute()
+
+    def _file_exit(self):
+        dpg.stop_dearpygui()
+
+    def _show_about(self):
+        if dpg.does_item_exist("about_window"):
+            dpg.delete_item("about_window")
+        with dpg.window(label="About", tag="about_window", modal=True, width=350, height=150, no_resize=True):
+            dpg.add_text("Orbital Mechanics Simulator")
+            dpg.add_text("A DearPyGui-based orbital simulation tool.")
+            dpg.add_text("Version 1.0")
+            dpg.add_separator()
+            dpg.add_button(label="Close", callback=lambda: dpg.delete_item("about_window"), width=80)
 
 
 def run():
