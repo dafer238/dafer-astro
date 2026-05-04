@@ -1,0 +1,1043 @@
+import dearpygui.dearpygui as dpg
+import numpy as np
+import time
+import os
+
+from simulator.ui.theme import create_theme
+from simulator.render.viewport3d import Viewport3D
+from simulator.sim.engine import SimulationEngine
+from simulator.sim.scenario import Scenario, PerturbationConfig, ManeuverEvent
+from simulator.sim.trajectory import TrajectoryData
+from simulator.core.state import OrbitalElements
+from simulator.core.bodies import CelestialBody
+from simulator.core.constants import R_EARTH, MU_EARTH
+from simulator.core.conversions import (
+    orbital_period,
+    specific_energy,
+    spec_ang_mom,
+    state_to_coe,
+    StateVector,
+    vis_viva,
+)
+from simulator.physics.maneuvers import hohmann_dv, bielliptic_dv, plane_change_dv, combined_dv
+from simulator.physics.perturbations import j2_raan_rate, j2_argp_rate
+from simulator.physics.propulsion import ENGINES, engine_mdot
+from simulator.core.conversions import coe_to_state
+
+
+class App:
+    def __init__(self):
+        self.engine = SimulationEngine()
+        self.compare_engine = SimulationEngine()
+        self.preview_engine = SimulationEngine()
+        self.viewport3d: Viewport3D | None = None
+        self.trajectory: TrajectoryData | None = None
+        self.compare_trajectory: TrajectoryData | None = None
+        self.preview_trajectory: TrajectoryData | None = None
+        self.playing = False
+        self.play_speed = 1.0
+        self.current_time = 0.0
+        self.last_frame_time = 0.0
+        self._console_lines: list[str] = []
+        self._maneuver_plan: list[ManeuverEvent] = []
+        self._left_panel_width = 280
+        self._right_panel_width = 300
+        self._bottom_panel_height = 140
+
+    def run(self):
+        dpg.create_context()
+        dpg.create_viewport(title="Orbital Mechanics Simulator", width=1400, height=900)
+
+        theme = create_theme()
+        dpg.bind_theme(theme)
+
+        self._build_ui()
+
+        dpg.setup_dearpygui()
+        dpg.show_viewport()
+
+        self.last_frame_time = time.time()
+        self._log("Simulator ready. Set orbital parameters and click [Compute].")
+
+        while dpg.is_dearpygui_running():
+            self._frame_update()
+            dpg.render_dearpygui_frame()
+
+        dpg.destroy_context()
+
+    def _build_ui(self):
+        with dpg.window(
+            tag="main_window",
+            no_title_bar=True,
+            no_move=True,
+            no_resize=True,
+            no_collapse=True,
+            no_scrollbar=True,
+            no_scroll_with_mouse=True,
+        ):
+            with dpg.child_window(tag="top_panel", border=False):
+                with dpg.group(horizontal=True):
+                    self._build_left_panel()
+                    self._build_center_panel()
+                    self._build_right_panel()
+
+            self._build_bottom_panel()
+
+        dpg.set_primary_window("main_window", True)
+
+    def _build_left_panel(self):
+        with dpg.child_window(width=260, tag="left_panel"):
+            dpg.add_text("ORBIT CONFIGURATION", color=(0, 191, 255))
+            dpg.add_separator()
+
+            dpg.add_text("Presets:", color=(150, 150, 150))
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="ISS", callback=self._preset_iss, width=55)
+                dpg.add_button(label="GEO", callback=self._preset_geo, width=55)
+                dpg.add_button(label="Molniya", callback=self._preset_molniya, width=70)
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="SSO", callback=self._preset_sso, width=55)
+                dpg.add_button(label="HEO", callback=self._preset_heo, width=55)
+
+            dpg.add_spacer(height=6)
+            dpg.add_text("Classical Orbital Elements:", color=(150, 150, 150))
+
+            dpg.add_input_float(
+                label="a (km)",
+                tag="coe_a",
+                default_value=6779.0,
+                width=140,
+                step=10.0,
+                format="%.1f",
+            )
+            dpg.add_input_float(
+                label="e", tag="coe_e", default_value=0.0001, width=140, step=0.001, format="%.5f"
+            )
+            dpg.add_slider_float(
+                label="i (deg)",
+                tag="coe_i",
+                default_value=51.6,
+                min_value=0.0,
+                max_value=180.0,
+                width=140,
+                format="%.2f",
+            )
+            dpg.add_slider_float(
+                label="RAAN (deg)",
+                tag="coe_raan",
+                default_value=0.0,
+                min_value=0.0,
+                max_value=360.0,
+                width=140,
+                format="%.2f",
+            )
+            dpg.add_slider_float(
+                label="omega (deg)",
+                tag="coe_omega",
+                default_value=0.0,
+                min_value=0.0,
+                max_value=360.0,
+                width=140,
+                format="%.2f",
+            )
+            dpg.add_slider_float(
+                label="theta (deg)",
+                tag="coe_theta",
+                default_value=0.0,
+                min_value=0.0,
+                max_value=360.0,
+                width=140,
+                format="%.2f",
+            )
+
+            dpg.add_spacer(height=4)
+            dpg.add_input_float(
+                label="Orbits",
+                tag="n_orbits",
+                default_value=3.0,
+                width=140,
+                step=1.0,
+                format="%.1f",
+            )
+
+            dpg.add_spacer(height=6)
+            dpg.add_button(
+                label="COMPUTE", callback=self._on_compute, width=-1, height=28, tag="compute_btn"
+            )
+
+            dpg.add_spacer(height=4)
+            dpg.add_text("", tag="orbit_info", color=(127, 255, 0))
+
+            dpg.add_spacer(height=10)
+            dpg.add_text("PERTURBATIONS", color=(255, 107, 53))
+            dpg.add_separator()
+
+            dpg.add_checkbox(label="J2 oblateness", tag="pert_j2", default_value=True)
+            dpg.add_checkbox(label="Atmospheric drag", tag="pert_drag", default_value=False)
+            dpg.add_slider_float(
+                label="Cd",
+                tag="drag_cd",
+                default_value=2.2,
+                min_value=1.5,
+                max_value=3.5,
+                width=140,
+                format="%.2f",
+            )
+            dpg.add_input_float(
+                label="B (km2/kg)",
+                tag="drag_B",
+                default_value=5.6e-9,
+                width=140,
+                format="%.2e",
+                step=0,
+                step_fast=0,
+            )
+
+            dpg.add_spacer(height=6)
+            dpg.add_text("", tag="pert_info", color=(150, 150, 150))
+
+            dpg.add_spacer(height=10)
+            dpg.add_text("MANEUVERS", color=(255, 255, 0))
+            dpg.add_separator()
+            dpg.add_text("Target alt (km):", color=(150, 150, 150))
+            dpg.add_input_float(
+                label="##target_alt",
+                tag="target_alt",
+                default_value=35786.0,
+                width=140,
+                format="%.1f",
+            )
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Hohmann", callback=self._calc_hohmann, width=80)
+                dpg.add_button(label="Bi-elliptic", callback=self._calc_bielliptic, width=90)
+            dpg.add_input_float(
+                label="Plane dI (deg)",
+                tag="plane_change_deg",
+                default_value=5.0,
+                width=140,
+                step=0.5,
+                format="%.2f",
+            )
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Plane-Only", callback=self._template_plane_change, width=80)
+                dpg.add_button(
+                    label="Transfer+Plane", callback=self._template_transfer_plane, width=110
+                )
+            dpg.add_checkbox(label="Compare vs no-burn", tag="compare_mode", default_value=True)
+            dpg.add_text("", tag="maneuver_info", color=(200, 200, 200), wrap=240)
+
+            dpg.add_spacer(height=8)
+            dpg.add_text("BURN TIMELINE", color=(255, 200, 80))
+            dpg.add_separator()
+            dpg.add_slider_float(
+                label="Burn @ % of sim",
+                tag="burn_time_pct",
+                min_value=0.0,
+                max_value=100.0,
+                default_value=25.0,
+                width=170,
+                format="%.1f",
+            )
+            dpg.add_input_float(
+                label="dv (km/s)",
+                tag="burn_dv",
+                default_value=0.050,
+                min_value=0.0,
+                width=170,
+                step=0.01,
+                format="%.3f",
+            )
+            dpg.add_combo(
+                ["prograde", "retrograde", "normal", "antinormal", "radial_out", "radial_in"],
+                default_value="prograde",
+                tag="burn_dir",
+                width=170,
+            )
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Add Burn", callback=self._add_burn, width=80)
+                dpg.add_button(label="Clear", callback=self._clear_burns, width=70)
+            dpg.add_input_text(
+                tag="burn_plan_text",
+                multiline=True,
+                readonly=True,
+                height=92,
+                width=-1,
+                default_value="No planned burns.",
+            )
+
+    def _build_center_panel(self):
+        with dpg.child_window(
+            width=-1,
+            tag="center_panel",
+            no_scrollbar=True,
+            no_scroll_with_mouse=True,
+        ):
+            dpg.add_text("3D VIEWPORT", color=(0, 191, 255))
+            dpg.add_separator()
+
+            self.viewport3d = Viewport3D("viewport_drawlist", width=780, height=540)
+            self.viewport3d.create("center_panel")
+
+            dpg.add_spacer(height=4)
+            dpg.add_text("View Presets:", color=(150, 150, 150))
+            with dpg.group(horizontal=True, tag="view_presets_row_1"):
+                dpg.add_button(
+                    label="ISO", callback=lambda: self.viewport3d.set_view_isometric(), width=52
+                )
+                dpg.add_button(label="XY", callback=lambda: self.viewport3d.set_view_xy(), width=52)
+                dpg.add_button(label="XZ", callback=lambda: self.viewport3d.set_view_xz(), width=52)
+                dpg.add_button(label="YZ", callback=lambda: self.viewport3d.set_view_yz(), width=52)
+
+            with dpg.group(horizontal=True, tag="view_presets_row_2"):
+                dpg.add_button(
+                    label="Orbit Normal",
+                    callback=lambda: self.viewport3d.set_view_orbit_normal(),
+                    width=108,
+                )
+                dpg.add_button(
+                    label="Along-Track",
+                    callback=lambda: self.viewport3d.set_view_along_velocity(),
+                    width=108,
+                )
+                dpg.add_button(
+                    label="Nadir", callback=lambda: self.viewport3d.set_view_nadir(), width=70
+                )
+
+            dpg.add_spacer(height=4)
+
+            with dpg.group(horizontal=True, tag="timeline_group"):
+                dpg.add_button(label="Play", tag="play_btn", callback=self._toggle_play, width=50)
+                dpg.add_button(label="Reset", callback=self._reset_time, width=50)
+                dpg.add_slider_float(
+                    label="##time_slider",
+                    tag="time_slider",
+                    default_value=0.0,
+                    min_value=0.0,
+                    max_value=1.0,
+                    width=350,
+                    callback=self._on_time_scrub,
+                    format="%.3f",
+                )
+                dpg.add_combo(
+                    ["1x", "5x", "10x", "50x", "100x", "500x", "1000x"],
+                    default_value="10x",
+                    tag="speed_combo",
+                    callback=self._on_speed_change,
+                    width=70,
+                )
+
+            dpg.add_text("t = 0.0 s  |  0.0 / 0.0 s", tag="time_display", color=(150, 150, 150))
+
+    def _build_right_panel(self):
+        with dpg.child_window(width=260, tag="right_panel"):
+            dpg.add_text("TELEMETRY", color=(127, 255, 0))
+            dpg.add_separator()
+
+            for label, tag in [
+                ("Altitude:", "tel_alt"),
+                ("Velocity:", "tel_vel"),
+                ("Period:", "tel_period"),
+                ("Energy:", "tel_energy"),
+                ("a:", "tel_a"),
+                ("e:", "tel_e"),
+                ("i:", "tel_i"),
+                ("RAAN:", "tel_raan"),
+                ("omega:", "tel_omega"),
+                ("theta:", "tel_theta"),
+            ]:
+                with dpg.group(horizontal=True):
+                    dpg.add_text(label, color=(150, 150, 150))
+                    dpg.add_text("---", tag=tag)
+
+            dpg.add_spacer(height=10)
+            dpg.add_text("2D PLOTS", color=(255, 107, 53))
+            dpg.add_separator()
+
+            with dpg.plot(label="Altitude", height=160, width=-1, tag="plot_alt"):
+                dpg.add_plot_axis(dpg.mvXAxis, label="t (min)", tag="alt_x")
+                dpg.add_plot_axis(dpg.mvYAxis, label="Alt (km)", tag="alt_y")
+
+            with dpg.plot(label="Velocity", height=160, width=-1, tag="plot_vel"):
+                dpg.add_plot_axis(dpg.mvXAxis, label="t (min)", tag="vel_x")
+                dpg.add_plot_axis(dpg.mvYAxis, label="v (km/s)", tag="vel_y")
+
+            dpg.add_spacer(height=10)
+            dpg.add_text("EXPORT", color=(0, 191, 255))
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="CSV", callback=self._export_csv, width=60)
+                dpg.add_button(label="Plots (PNG)", callback=self._export_plots, width=90)
+            dpg.add_text("", tag="export_status", color=(150, 150, 150))
+
+            dpg.add_spacer(height=8)
+            dpg.add_text("BURN EVENTS", color=(255, 200, 80))
+            dpg.add_separator()
+            dpg.add_input_text(
+                tag="burn_events_text",
+                multiline=True,
+                readonly=True,
+                height=92,
+                width=-1,
+                default_value="No executed burns.",
+            )
+
+            dpg.add_spacer(height=8)
+            dpg.add_text("COMPARE", color=(160, 210, 255))
+            dpg.add_separator()
+            dpg.add_input_text(
+                tag="compare_text",
+                multiline=True,
+                readonly=True,
+                height=66,
+                width=-1,
+                default_value="Compare mode idle.",
+            )
+
+    def _build_bottom_panel(self):
+        with dpg.child_window(tag="bottom_panel", border=False):
+            dpg.add_text("CONSOLE", color=(150, 150, 150))
+            dpg.add_separator()
+            dpg.add_input_text(
+                tag="console_text",
+                multiline=True,
+                readonly=True,
+                height=80,
+                width=-1,
+                default_value="",
+            )
+
+    def _log(self, msg: str):
+        self._console_lines.append(f"> {msg}")
+        if len(self._console_lines) > 50:
+            self._console_lines = self._console_lines[-50:]
+        dpg.set_value("console_text", "\n".join(self._console_lines))
+
+    def _frame_update(self):
+        now = time.time()
+        dt_frame = now - self.last_frame_time
+        self.last_frame_time = now
+        self._update_layout()
+
+        if self.preview_engine.is_complete and self.preview_trajectory is None:
+            preview_result = self.preview_engine.result
+            if preview_result is not None:
+                self.preview_trajectory = preview_result
+                self.viewport3d.set_preview_trajectory(preview_result)
+
+        if self.compare_engine.is_complete and self.compare_trajectory is None:
+            compare_result = self.compare_engine.result
+            if compare_result is not None:
+                self.compare_trajectory = compare_result
+                self.viewport3d.set_reference_trajectory(compare_result)
+                self._update_compare_metrics()
+                self._log(f"Compare baseline ready: {compare_result.n_points} points")
+
+        if self.engine.is_complete and self.trajectory is None:
+            result = self.engine.result
+            if result is not None:
+                self.trajectory = result
+                self.viewport3d.set_trajectory(result)
+                self.viewport3d.clear_transfers()
+                burn_events = self.engine.burn_events
+                if len(burn_events) > 0:
+                    burn_points = np.array([ev["r"] for ev in burn_events])
+                    self.viewport3d.set_burn_markers(burn_points)
+                else:
+                    self.viewport3d.clear_burn_markers()
+                self._update_burn_events_display(burn_events)
+                self._update_compare_metrics()
+                self.current_time = result.t[0]
+                self._update_plots()
+                self._update_orbit_info()
+                val = self.engine.validation
+                if val:
+                    self._log(
+                        f"Conservation: dE/E={val['energy_drift']:.2e}  "
+                        f"dh/h={val['angular_momentum_drift']:.2e}"
+                    )
+                self._log(f"Done: {result.n_points} points, duration={result.duration:.1f}s")
+                dpg.configure_item("time_slider", max_value=result.duration)
+            elif self.engine.error:
+                self._log(f"ERROR: {self.engine.error}")
+
+        if self.playing and self.trajectory is not None:
+            self.current_time += dt_frame * self.play_speed * self.trajectory.duration / 30.0
+            if self.current_time > self.trajectory.t[-1]:
+                self.current_time = self.trajectory.t[0]
+            dpg.set_value("time_slider", self.current_time)
+            self.viewport3d.set_time(self.current_time)
+            self._update_telemetry()
+            self._update_time_display()
+
+        if self.viewport3d:
+            self.viewport3d.render()
+
+    def _on_compute(self):
+        a = dpg.get_value("coe_a")
+        e = dpg.get_value("coe_e")
+        i = dpg.get_value("coe_i")
+        raan = dpg.get_value("coe_raan")
+        omega = dpg.get_value("coe_omega")
+        theta = dpg.get_value("coe_theta")
+        n_orb = dpg.get_value("n_orbits")
+        n_orb_eff = self._effective_n_orbits(a, n_orb)
+        if n_orb_eff > n_orb + 1e-6:
+            dpg.set_value("n_orbits", n_orb_eff)
+            n_orb = n_orb_eff
+            self._log(f"Auto-extended simulated orbits to {n_orb:.2f} so all burns are visible.")
+
+        coe = OrbitalElements(a=a, e=e, i=i, raan=raan, omega=omega, theta=theta)
+
+        pert = PerturbationConfig(
+            j2_enabled=dpg.get_value("pert_j2"),
+            drag_enabled=dpg.get_value("pert_drag"),
+            drag_cd=dpg.get_value("drag_cd"),
+            drag_ballistic_coeff=dpg.get_value("drag_B"),
+        )
+
+        scenario = Scenario(
+            initial_coe=coe,
+            central_body=CelestialBody.earth(),
+            perturbations=pert,
+            n_orbits=n_orb,
+            maneuvers=self._build_absolute_maneuvers(a, n_orb),
+        )
+
+        compare_enabled = bool(dpg.get_value("compare_mode"))
+        compare_scenario = None
+        if compare_enabled and len(scenario.maneuvers) > 0:
+            compare_scenario = Scenario(
+                initial_coe=coe,
+                central_body=CelestialBody.earth(),
+                perturbations=pert,
+                n_orbits=n_orb,
+                maneuvers=[],
+            )
+
+        self.trajectory = None
+        self.compare_trajectory = None
+        self.preview_trajectory = None
+        self.viewport3d.clear_transfers()
+        self.viewport3d.clear_preview_trajectory()
+        self.viewport3d.clear_reference_trajectory()
+        self.viewport3d.clear_burn_markers()
+        self._update_burn_events_display([])
+        dpg.set_value("compare_text", "Compare mode idle.")
+        self.playing = False
+        dpg.set_value("play_btn", "Play")
+        self.engine.compute(scenario)
+        if compare_scenario is not None:
+            self.compare_engine.compute(compare_scenario)
+            self._log("Computing baseline no-burn trajectory for comparison...")
+        self._log(
+            f"Computing: a={a:.1f} e={e:.4f} i={i:.1f} n={n_orb:.0f} orbits, burns={len(scenario.maneuvers)}"
+        )
+
+    def _update_layout(self):
+        vw = max(640, dpg.get_viewport_client_width())
+        vh = max(480, dpg.get_viewport_client_height())
+
+        dpg.configure_item("main_window", pos=(0, 0), width=vw, height=vh)
+
+        bottom_h = min(max(110, int(vh * 0.21)), 250)
+        top_h = max(220, vh - bottom_h - 8)
+
+        left_w = min(self._left_panel_width, max(220, int(vw * 0.25)))
+        right_w = min(self._right_panel_width, max(240, int(vw * 0.28)))
+        remaining_w = vw - left_w - right_w - 30
+        if remaining_w < 320:
+            shortage = 320 - remaining_w
+            right_reduce = min(shortage, max(0, right_w - 220))
+            right_w -= right_reduce
+            shortage -= right_reduce
+            left_reduce = min(shortage, max(0, left_w - 200))
+            left_w -= left_reduce
+        center_w = max(320, vw - left_w - right_w - 30)
+
+        dpg.configure_item("top_panel", width=vw - 12, height=top_h - 4)
+        dpg.configure_item("left_panel", width=left_w, height=top_h - 8)
+        dpg.configure_item("center_panel", width=center_w, height=top_h - 8)
+        dpg.configure_item("right_panel", width=right_w, height=top_h - 8)
+
+        dpg.configure_item("bottom_panel", width=vw - 12, height=bottom_h - 6)
+
+        console_h = max(64, bottom_h - 48)
+        dpg.configure_item("console_text", height=console_h)
+
+        viewport_w = max(320, center_w - 16)
+        viewport_h = max(260, top_h - 170)
+        if self.viewport3d is not None:
+            self.viewport3d.resize(viewport_w, viewport_h)
+
+        slider_w = max(180, viewport_w - 320)
+        dpg.configure_item("time_slider", width=slider_w)
+
+    def _toggle_play(self):
+        if self.trajectory is None:
+            return
+        self.playing = not self.playing
+        dpg.configure_item("play_btn", label="Pause" if self.playing else "Play")
+
+    def _reset_time(self):
+        if self.trajectory is None:
+            return
+        self.current_time = self.trajectory.t[0]
+        dpg.set_value("time_slider", 0.0)
+        self.viewport3d.set_time(self.current_time)
+        self._update_telemetry()
+        self._update_time_display()
+
+    def _on_time_scrub(self, sender, app_data):
+        if self.trajectory is None:
+            return
+        self.current_time = app_data
+        self.viewport3d.set_time(self.current_time)
+        self._update_telemetry()
+        self._update_time_display()
+
+    def _on_speed_change(self, sender, app_data):
+        speed_map = {
+            "1x": 1,
+            "5x": 5,
+            "10x": 10,
+            "50x": 50,
+            "100x": 100,
+            "500x": 500,
+            "1000x": 1000,
+        }
+        self.play_speed = speed_map.get(app_data, 10)
+
+    def _update_telemetry(self):
+        if self.trajectory is None:
+            return
+        r, v = self.trajectory.interpolate(self.current_time)
+        alt = np.linalg.norm(r) - R_EARTH
+        vel = np.linalg.norm(v)
+        eps = specific_energy(r, v, MU_EARTH)
+        coe = state_to_coe(StateVector(r=r, v=v))
+        T = orbital_period(coe.a, MU_EARTH)
+
+        dpg.set_value("tel_alt", f"{alt:.2f} km")
+        dpg.set_value("tel_vel", f"{vel:.4f} km/s")
+        dpg.set_value("tel_period", f"{T / 60:.2f} min")
+        dpg.set_value("tel_energy", f"{eps:.4f} km2/s2")
+        dpg.set_value("tel_a", f"{coe.a:.2f} km")
+        dpg.set_value("tel_e", f"{coe.e:.6f}")
+        dpg.set_value("tel_i", f"{coe.i:.4f} deg")
+        dpg.set_value("tel_raan", f"{coe.raan:.4f} deg")
+        dpg.set_value("tel_omega", f"{coe.omega:.4f} deg")
+        dpg.set_value("tel_theta", f"{coe.theta:.2f} deg")
+
+    def _update_time_display(self):
+        if self.trajectory is None:
+            return
+        dur = self.trajectory.duration
+        dpg.set_value(
+            "time_display",
+            f"t = {self.current_time:.1f} s  |  {self.current_time:.1f} / {dur:.1f} s",
+        )
+
+    def _update_orbit_info(self):
+        a = dpg.get_value("coe_a")
+        e = dpg.get_value("coe_e")
+        i = dpg.get_value("coe_i")
+        T = orbital_period(a, MU_EARTH)
+        rp = a * (1 - e)
+        ra = a * (1 + e)
+        dpg.set_value(
+            "orbit_info", f"T={T / 60:.2f}min  rp={rp - R_EARTH:.0f}km  ra={ra - R_EARTH:.0f}km"
+        )
+
+        if dpg.get_value("pert_j2"):
+            dr = j2_raan_rate(a, e, i)
+            dw = j2_argp_rate(a, e, i)
+            dpg.set_value("pert_info", f"J2: dRAAN={dr:.3f} d/day  dw={dw:.3f} d/day")
+
+    def _update_plots(self):
+        if self.trajectory is None:
+            return
+        t_min = self.trajectory.t / 60.0
+        alt = np.linalg.norm(self.trajectory.r, axis=1) - R_EARTH
+        vel = np.linalg.norm(self.trajectory.v, axis=1)
+
+        if dpg.does_item_exist("alt_series"):
+            dpg.delete_item("alt_series")
+        if dpg.does_item_exist("vel_series"):
+            dpg.delete_item("vel_series")
+
+        dpg.add_line_series(t_min.tolist(), alt.tolist(), parent="alt_y", tag="alt_series")
+        dpg.add_line_series(t_min.tolist(), vel.tolist(), parent="vel_y", tag="vel_series")
+
+        dpg.fit_axis_data("alt_x")
+        dpg.fit_axis_data("alt_y")
+        dpg.fit_axis_data("vel_x")
+        dpg.fit_axis_data("vel_y")
+
+    def _calc_hohmann(self):
+        a = dpg.get_value("coe_a")
+        e = dpg.get_value("coe_e")
+        r1 = a * (1 - e) if e > 0.01 else a
+        target_alt = dpg.get_value("target_alt")
+        r2 = R_EARTH + target_alt
+        result = hohmann_dv(r1, r2)
+        transfer = self._build_transfer_arc(result["r1"], result["r2"])
+        if transfer is not None:
+            self.viewport3d.clear_transfers()
+            self.viewport3d.add_transfer_trajectory(transfer, color=(255, 220, 30, 240))
+        burn_dir = "prograde" if r2 >= r1 else "retrograde"
+        self._set_maneuver_plan(
+            [
+                ManeuverEvent(time=0.0, dv_magnitude=result["dv1"], direction=burn_dir),
+                ManeuverEvent(
+                    time=result["dt_transfer"], dv_magnitude=result["dv2"], direction=burn_dir
+                ),
+            ]
+        )
+        msg = (
+            f"Hohmann: dv1={result['dv1']:.4f} dv2={result['dv2']:.4f}\n"
+            f"Total={result['dv_total']:.4f} km/s\n"
+            f"Transit={result['dt_transfer'] / 3600:.2f} h"
+        )
+        dpg.set_value("maneuver_info", msg)
+        self._log(f"Hohmann: dv_total={result['dv_total']:.4f} km/s (burn plan loaded)")
+
+    def _calc_bielliptic(self):
+        a = dpg.get_value("coe_a")
+        e = dpg.get_value("coe_e")
+        r1 = a * (1 - e) if e > 0.01 else a
+        target_alt = dpg.get_value("target_alt")
+        r2 = R_EARTH + target_alt
+        r_b = max(r1, r2) * 2.5
+        result = bielliptic_dv(r1, r2, r_b)
+        a1 = 0.5 * (r1 + r_b)
+        a2 = 0.5 * (r2 + r_b)
+        dt1 = orbital_period(a1, MU_EARTH) / 2.0
+        dt2 = orbital_period(a2, MU_EARTH) / 2.0
+        transfer_1 = self._build_transfer_arc(r1, r_b)
+        transfer_2 = self._build_transfer_arc(r_b, r2)
+        self.viewport3d.clear_transfers()
+        if transfer_1 is not None:
+            self.viewport3d.add_transfer_trajectory(transfer_1, color=(255, 210, 40, 230))
+        if transfer_2 is not None:
+            self.viewport3d.add_transfer_trajectory(transfer_2, color=(255, 140, 40, 230))
+        self._set_maneuver_plan(
+            [
+                ManeuverEvent(time=0.0, dv_magnitude=result["dv1"], direction="prograde"),
+                ManeuverEvent(time=dt1, dv_magnitude=result["dv2"], direction="prograde"),
+                ManeuverEvent(time=dt1 + dt2, dv_magnitude=result["dv3"], direction="retrograde"),
+            ]
+        )
+        msg = (
+            f"Bi-elliptic: dv1={result['dv1']:.4f}\n"
+            f"dv2={result['dv2']:.4f} dv3={result['dv3']:.4f}\n"
+            f"Total={result['dv_total']:.4f} km/s"
+        )
+        dpg.set_value("maneuver_info", msg)
+        self._log(f"Bi-elliptic: dv_total={result['dv_total']:.4f} km/s (burn plan loaded)")
+
+    def _template_plane_change(self):
+        a = dpg.get_value("coe_a")
+        e = dpg.get_value("coe_e")
+        delta_i = abs(float(dpg.get_value("plane_change_deg")))
+        r = a * (1 - e * e)
+        v_orb = np.sqrt(MU_EARTH / max(1.0, r))
+        dv = plane_change_dv(v_orb, delta_i)
+        self._set_maneuver_plan([ManeuverEvent(time=0.5, dv_magnitude=dv, direction="normal")])
+        dpg.set_value(
+            "maneuver_info",
+            f"Plane change template\ndI={delta_i:.2f} deg\ndv={dv:.4f} km/s",
+        )
+        self._log(f"Plane-change template loaded: dI={delta_i:.2f} dv={dv:.4f} km/s")
+
+    def _template_transfer_plane(self):
+        a = dpg.get_value("coe_a")
+        e = dpg.get_value("coe_e")
+        r1 = a * (1 - e) if e > 0.01 else a
+        target_alt = dpg.get_value("target_alt")
+        delta_i = abs(float(dpg.get_value("plane_change_deg")))
+        r2 = R_EARTH + target_alt
+
+        result = hohmann_dv(r1, r2)
+        a_t = 0.5 * (r1 + r2)
+        v_transfer_at_r2 = vis_viva(r2, a_t, MU_EARTH)
+        v_circ_r2 = np.sqrt(MU_EARTH / r2)
+        dv2_combined = combined_dv(v_transfer_at_r2, v_circ_r2, delta_i)
+        burn_dir = "prograde" if r2 >= r1 else "retrograde"
+
+        self._set_maneuver_plan(
+            [
+                ManeuverEvent(time=0.0, dv_magnitude=result["dv1"], direction=burn_dir),
+                ManeuverEvent(
+                    time=result["dt_transfer"], dv_magnitude=dv2_combined, direction=burn_dir
+                ),
+            ]
+        )
+        dpg.set_value(
+            "maneuver_info",
+            f"Transfer+plane template\ndv1={result['dv1']:.4f} km/s\ndv2*={dv2_combined:.4f} km/s",
+        )
+        self._log(
+            f"Transfer+plane template loaded: dv1={result['dv1']:.4f}, dv2*={dv2_combined:.4f} km/s"
+        )
+
+    def _build_absolute_maneuvers(self, a: float, n_orbits: float) -> list[ManeuverEvent]:
+        total_duration = orbital_period(a, MU_EARTH) * n_orbits
+        burns: list[ManeuverEvent] = []
+        for event in self._maneuver_plan:
+            t_abs = float(event.time)
+            if 0.0 <= t_abs <= 1.0:
+                t_abs = total_duration * t_abs
+            if 0.0 <= t_abs <= total_duration:
+                burns.append(
+                    ManeuverEvent(
+                        time=t_abs,
+                        dv_magnitude=float(event.dv_magnitude),
+                        direction=str(event.direction),
+                    )
+                )
+        burns.sort(key=lambda b: b.time)
+        return burns
+
+    def _effective_n_orbits(self, a: float, n_orbits: float) -> float:
+        if len(self._maneuver_plan) == 0:
+            return n_orbits
+
+        orbit_time = orbital_period(a, MU_EARTH)
+        total_duration = orbit_time * n_orbits
+        max_time = 0.0
+        for event in self._maneuver_plan:
+            t = float(event.time)
+            if 0.0 <= t <= 1.0:
+                t = total_duration * t
+            max_time = max(max_time, t)
+
+        desired_duration = max(total_duration, max_time + 0.8 * orbit_time)
+        return max(n_orbits, desired_duration / orbit_time)
+
+    def _request_maneuver_preview(self):
+        if self.viewport3d is None:
+            return
+
+        self.preview_trajectory = None
+        self.viewport3d.clear_preview_trajectory()
+
+        if len(self._maneuver_plan) == 0:
+            return
+
+        a = float(dpg.get_value("coe_a"))
+        e = float(dpg.get_value("coe_e"))
+        i = float(dpg.get_value("coe_i"))
+        raan = float(dpg.get_value("coe_raan"))
+        omega = float(dpg.get_value("coe_omega"))
+        theta = float(dpg.get_value("coe_theta"))
+        n_orb = float(dpg.get_value("n_orbits"))
+        n_orb = self._effective_n_orbits(a, n_orb)
+
+        coe = OrbitalElements(a=a, e=e, i=i, raan=raan, omega=omega, theta=theta)
+        pert = PerturbationConfig(
+            j2_enabled=dpg.get_value("pert_j2"),
+            drag_enabled=dpg.get_value("pert_drag"),
+            drag_cd=dpg.get_value("drag_cd"),
+            drag_ballistic_coeff=dpg.get_value("drag_B"),
+        )
+        scenario = Scenario(
+            initial_coe=coe,
+            central_body=CelestialBody.earth(),
+            perturbations=pert,
+            n_orbits=n_orb,
+            maneuvers=self._build_absolute_maneuvers(a, n_orb),
+        )
+        self.preview_engine.compute(scenario)
+
+    def _set_maneuver_plan(self, events: list[ManeuverEvent]):
+        self._maneuver_plan = sorted(events, key=lambda e: e.time)
+        self._refresh_burn_plan_display()
+        self._request_maneuver_preview()
+
+    def _add_burn(self):
+        t_pct = float(dpg.get_value("burn_time_pct"))
+        dv = float(dpg.get_value("burn_dv"))
+        direction = str(dpg.get_value("burn_dir"))
+        if dv <= 0.0:
+            self._log("Burn ignored: dv must be > 0.")
+            return
+
+        self._maneuver_plan.append(
+            ManeuverEvent(
+                time=t_pct / 100.0,
+                dv_magnitude=dv,
+                direction=direction,
+            )
+        )
+        self._maneuver_plan.sort(key=lambda e: e.time)
+        self._refresh_burn_plan_display()
+        self._request_maneuver_preview()
+        self._log(f"Added burn: t={t_pct:.1f}% dv={dv:.3f} km/s dir={direction}")
+
+    def _clear_burns(self):
+        self._maneuver_plan.clear()
+        self._refresh_burn_plan_display()
+        self._request_maneuver_preview()
+        self._log("Cleared planned burns.")
+
+    def _refresh_burn_plan_display(self):
+        if len(self._maneuver_plan) == 0:
+            dpg.set_value("burn_plan_text", "No planned burns.")
+            return
+
+        lines = []
+        for idx, burn in enumerate(self._maneuver_plan, start=1):
+            if 0.0 <= burn.time <= 1.0:
+                when = f"{burn.time * 100.0:5.1f}%"
+            else:
+                when = f"{burn.time:7.1f}s"
+            lines.append(f"{idx:02d}. t={when}  dv={burn.dv_magnitude:.4f}  {burn.direction}")
+        dpg.set_value("burn_plan_text", "\n".join(lines))
+
+    def _update_burn_events_display(self, burn_events: list[dict]):
+        if len(burn_events) == 0:
+            dpg.set_value("burn_events_text", "No executed burns.")
+            return
+
+        rows = []
+        dv_total = 0.0
+        for idx, ev in enumerate(burn_events, start=1):
+            dv_total += ev["dv"]
+            rows.append(f"{idx:02d}. t={ev['time']:.1f}s dv={ev['dv']:.4f} {ev['direction']}")
+            rows.append(f"    a={ev['a']:.1f}km e={ev['e']:.5f} i={ev['i']:.2f}deg")
+
+        rows.append(f"Total dv={dv_total:.4f} km/s")
+        dpg.set_value("burn_events_text", "\n".join(rows))
+
+    def _update_compare_metrics(self):
+        if self.trajectory is None or self.compare_trajectory is None:
+            if dpg.get_value("compare_mode"):
+                dpg.set_value("compare_text", "Waiting for both trajectories...")
+            return
+
+        r_main = self.trajectory.r[-1]
+        v_main = self.trajectory.v[-1]
+        r_ref = self.compare_trajectory.r[-1]
+        v_ref = self.compare_trajectory.v[-1]
+
+        alt_main = np.linalg.norm(r_main) - R_EARTH
+        alt_ref = np.linalg.norm(r_ref) - R_EARTH
+        d_alt = alt_main - alt_ref
+        d_speed = np.linalg.norm(v_main) - np.linalg.norm(v_ref)
+        miss = np.linalg.norm(r_main - r_ref)
+
+        dpg.set_value(
+            "compare_text",
+            f"Final dAlt={d_alt:+.2f} km\n"
+            f"Final dV={d_speed:+.5f} km/s\n"
+            f"Position miss={miss:.2f} km",
+        )
+
+    def _build_transfer_arc(
+        self, r_start: float, r_end: float, n_points: int = 420
+    ) -> TrajectoryData | None:
+        if n_points < 8:
+            n_points = 8
+
+        i = dpg.get_value("coe_i")
+        raan = dpg.get_value("coe_raan")
+        omega = dpg.get_value("coe_omega")
+        a_t = (r_start + r_end) / 2.0
+        e_t = abs(r_end - r_start) / (r_start + r_end)
+
+        if r_end >= r_start:
+            theta_0 = 0.0
+            theta_1 = 180.0
+        else:
+            theta_0 = 180.0
+            theta_1 = 360.0
+
+        theta = np.linspace(theta_0, theta_1, n_points)
+        t = np.linspace(0.0, orbital_period(a_t, MU_EARTH) / 2.0, n_points)
+
+        r_hist = np.zeros((n_points, 3))
+        v_hist = np.zeros((n_points, 3))
+        for idx, th in enumerate(theta):
+            sv = coe_to_state(OrbitalElements(a=a_t, e=e_t, i=i, raan=raan, omega=omega, theta=th))
+            r_hist[idx] = sv.r
+            v_hist[idx] = sv.v
+
+        return TrajectoryData(t=t, r=r_hist, v=v_hist)
+
+    def _export_csv(self):
+        if self.trajectory is None:
+            self._log("No trajectory to export.")
+            return
+        from simulator.export.csv_export import export_trajectory_csv
+
+        path = export_trajectory_csv(self.trajectory)
+        dpg.set_value("export_status", f"Saved: {os.path.basename(path)}")
+        self._log(f"Exported CSV: {path}")
+
+    def _export_plots(self):
+        if self.trajectory is None:
+            self._log("No trajectory to export.")
+            return
+        from simulator.export.mpl_plots import export_plots
+
+        path = export_plots(self.trajectory)
+        dpg.set_value("export_status", f"Saved: {os.path.basename(path)}")
+        self._log(f"Exported plots: {path}")
+
+    def _preset_iss(self):
+        dpg.set_value("coe_a", 6779.0)
+        dpg.set_value("coe_e", 0.0001)
+        dpg.set_value("coe_i", 51.6)
+        dpg.set_value("coe_raan", 0.0)
+        dpg.set_value("coe_omega", 0.0)
+        dpg.set_value("coe_theta", 0.0)
+        dpg.set_value("n_orbits", 3.0)
+
+    def _preset_geo(self):
+        dpg.set_value("coe_a", 42157.0)
+        dpg.set_value("coe_e", 0.0001)
+        dpg.set_value("coe_i", 0.0)
+        dpg.set_value("coe_raan", 0.0)
+        dpg.set_value("coe_omega", 0.0)
+        dpg.set_value("coe_theta", 0.0)
+        dpg.set_value("n_orbits", 1.0)
+
+    def _preset_molniya(self):
+        rp = R_EARTH + 600.0
+        ra = R_EARTH + 39000.0
+        a = (rp + ra) / 2.0
+        e = (ra - rp) / (ra + rp)
+        dpg.set_value("coe_a", a)
+        dpg.set_value("coe_e", e)
+        dpg.set_value("coe_i", 63.4)
+        dpg.set_value("coe_raan", 0.0)
+        dpg.set_value("coe_omega", 270.0)
+        dpg.set_value("coe_theta", 0.0)
+        dpg.set_value("n_orbits", 2.0)
+
+    def _preset_sso(self):
+        dpg.set_value("coe_a", 6971.0)
+        dpg.set_value("coe_e", 0.0001)
+        dpg.set_value("coe_i", 97.8)
+        dpg.set_value("coe_raan", 0.0)
+        dpg.set_value("coe_omega", 0.0)
+        dpg.set_value("coe_theta", 0.0)
+        dpg.set_value("n_orbits", 5.0)
+
+    def _preset_heo(self):
+        rp = R_EARTH + 300.0
+        ra = R_EARTH + 60000.0
+        a = (rp + ra) / 2.0
+        e = (ra - rp) / (ra + rp)
+        dpg.set_value("coe_a", a)
+        dpg.set_value("coe_e", e)
+        dpg.set_value("coe_i", 28.5)
+        dpg.set_value("coe_raan", 0.0)
+        dpg.set_value("coe_omega", 0.0)
+        dpg.set_value("coe_theta", 0.0)
+        dpg.set_value("n_orbits", 1.0)
+
+
+def run():
+    app = App()
+    app.run()
