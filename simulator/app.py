@@ -1092,8 +1092,6 @@ class App:
         """Rebuild multi-trajectories from stored burn trajectories for all SC."""
         if not self.viewport3d or not self._tab1_spacecraft:
             return
-        if not self.viewport3d._multi_trajectories and self._tab1_multi_result is None:
-            return
         new_multi = []
         for sc in self._tab1_spacecraft:
             name = sc["name"]
@@ -1963,8 +1961,23 @@ class App:
         self._log("Cleared preview overlays.")
 
     def _on_escape(self, sender=None, app_data=None):
-        """Escape key: clear burn preview."""
+        """Escape key: clear burn preview and deselect all orbits."""
         self._clear_preview_only()
+        # Deselect orbit
+        if self.viewport3d:
+            self.viewport3d._selected_orbit = None
+            self.viewport3d._needs_redraw = True
+        self.trajectory = None
+        self._active_sc_name = None
+        dpg.set_value("active_sc_select", "")
+        # Clear telemetry and plots
+        for tag in ("tel_alt", "tel_vel", "tel_period", "tel_energy", "tel_a", "tel_e", "tel_i", "tel_raan", "tel_omega", "tel_theta"):
+            if dpg.does_item_exist(tag):
+                dpg.set_value(tag, "—")
+        for tag in ("alt_series", "vel_series", "alt_cursor", "vel_cursor"):
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
+        self._update_burn_events_display([])
 
     def _fit_view(self):
         if self.viewport3d:
