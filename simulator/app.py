@@ -38,6 +38,8 @@ class App:
         self.play_speed = 1.0
         self.current_time = 0.0
         self.last_frame_time = 0.0
+        self._post_burn_period_hint = orbital_period(6779.0, MU_EARTH)
+        self._preview_enabled = True
         self._console_lines: list[str] = []
         self._maneuver_plan: list[ManeuverEvent] = []
         self._left_panel_width = 280
@@ -237,6 +239,7 @@ class App:
                 default_value=25.0,
                 width=170,
                 format="%.1f",
+                callback=self._update_burn_cursor,
             )
             dpg.add_input_float(
                 label="dv (km/s)",
@@ -248,14 +251,32 @@ class App:
                 format="%.3f",
             )
             dpg.add_combo(
+                ["Percent", "Periapsis", "Apoapsis", "Ascending Node", "Descending Node"],
+                default_value="Percent",
+                tag="burn_anchor",
+                width=170,
+                callback=self._update_burn_cursor,
+            )
+            dpg.add_combo(
                 ["prograde", "retrograde", "normal", "antinormal", "radial_out", "radial_in"],
                 default_value="prograde",
                 tag="burn_dir",
                 width=170,
+                callback=self._update_burn_cursor,
             )
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Add Burn", callback=self._add_burn, width=80)
                 dpg.add_button(label="Clear", callback=self._clear_burns, width=70)
+                dpg.add_button(label="Clear Preview", callback=self._clear_preview_only, width=90)
+            dpg.add_input_int(
+                label="Remove # ",
+                tag="burn_remove_idx",
+                default_value=1,
+                min_value=1,
+                width=70,
+                min_clamped=True,
+            )
+            dpg.add_button(label="Remove Burn", callback=self._remove_burn, width=110)
             dpg.add_input_text(
                 tag="burn_plan_text",
                 multiline=True,
@@ -418,7 +439,11 @@ class App:
         self.last_frame_time = now
         self._update_layout()
 
-        if self.preview_engine.is_complete and self.preview_trajectory is None:
+        if (
+            self._preview_enabled
+            and self.preview_engine.is_complete
+            and self.preview_trajectory is None
+        ):
             preview_result = self.preview_engine.result
             if preview_result is not None:
                 self.preview_trajectory = preview_result
@@ -514,6 +539,7 @@ class App:
                 maneuvers=[],
             )
 
+        self._preview_enabled = False
         self.trajectory = None
         self.compare_trajectory = None
         self.preview_trajectory = None
@@ -680,6 +706,7 @@ class App:
         target_alt = dpg.get_value("target_alt")
         r2 = R_EARTH + target_alt
         result = hohmann_dv(r1, r2)
+        self._post_burn_period_hint = orbital_period(r2, MU_EARTH)
         transfer = self._build_transfer_arc(result["r1"], result["r2"])
         if transfer is not None:
             self.viewport3d.clear_transfers()
@@ -709,6 +736,7 @@ class App:
         r2 = R_EARTH + target_alt
         r_b = max(r1, r2) * 2.5
         result = bielliptic_dv(r1, r2, r_b)
+        self._post_burn_period_hint = orbital_period(r2, MU_EARTH)
         a1 = 0.5 * (r1 + r_b)
         a2 = 0.5 * (r2 + r_b)
         dt1 = orbital_period(a1, MU_EARTH) / 2.0
@@ -742,6 +770,7 @@ class App:
         r = a * (1 - e * e)
         v_orb = np.sqrt(MU_EARTH / max(1.0, r))
         dv = plane_change_dv(v_orb, delta_i)
+        self._post_burn_period_hint = orbital_period(a, MU_EARTH)
         self._set_maneuver_plan([ManeuverEvent(time=0.5, dv_magnitude=dv, direction="normal")])
         dpg.set_value(
             "maneuver_info",
@@ -758,6 +787,7 @@ class App:
         r2 = R_EARTH + target_alt
 
         result = hohmann_dv(r1, r2)
+        self._post_burn_period_hint = orbital_period(r2, MU_EARTH)
         a_t = 0.5 * (r1 + r2)
         v_transfer_at_r2 = vis_viva(r2, a_t, MU_EARTH)
         v_circ_r2 = np.sqrt(MU_EARTH / r2)
@@ -781,12 +811,17 @@ class App:
         )
 
     def _build_absolute_maneuvers(self, a: float, n_orbits: float) -> list[ManeuverEvent]:
-        total_duration = orbital_period(a, MU_EARTH) * n_orbits
+        single_orbit = orbital_period(a, MU_EARTH)
+        total_duration = single_orbit * n_orbits
         burns: list[ManeuverEvent] = []
         for event in self._maneuver_plan:
-            t_abs = float(event.time)
-            if 0.0 <= t_abs <= 1.0:
-                t_abs = total_duration * t_abs
+            t = float(event.time)
+            # Convention: values <= 50 are fractions of one initial orbit period
+            # Values > 50 are absolute seconds (from templates like Hohmann)
+            if t <= 50.0:
+                t_abs = t * single_orbit
+            else:
+                t_abs = t
             if 0.0 <= t_abs <= total_duration:
                 burns.append(
                     ManeuverEvent(
@@ -804,20 +839,92 @@ class App:
 
         orbit_time = orbital_period(a, MU_EARTH)
         total_duration = orbit_time * n_orbits
+
+        # Find time of last burn in absolute seconds
         max_time = 0.0
         for event in self._maneuver_plan:
             t = float(event.time)
-            if 0.0 <= t <= 1.0:
-                t = total_duration * t
+            if t <= 50.0:
+                t = t * orbit_time
             max_time = max(max_time, t)
 
-        desired_duration = max(total_duration, max_time + 0.8 * orbit_time)
+        # Estimate post-burn orbit period by propagating through all burns
+        e0 = float(dpg.get_value("coe_e"))
+        i0 = float(dpg.get_value("coe_i"))
+        raan0 = float(dpg.get_value("coe_raan"))
+        omega0 = float(dpg.get_value("coe_omega"))
+        theta0 = float(dpg.get_value("coe_theta"))
+        coe = OrbitalElements(a=a, e=e0, i=i0, raan=raan0, omega=omega0, theta=theta0)
+        sv = coe_to_state(coe, MU_EARTH)
+        v_vec = np.array(sv.v)
+        r_vec = np.array(sv.r)
+
+        sorted_burns = sorted(self._maneuver_plan, key=lambda b: b.time)
+        last_t = 0.0
+        for burn in sorted_burns:
+            bv = float(burn.time)
+            bt = bv * orbit_time if bv <= 50.0 else bv
+            dt = bt - last_t
+            if dt > 0:
+                r_mag = np.linalg.norm(r_vec)
+                a_cur = 1.0 / (2.0 / r_mag - np.dot(v_vec, v_vec) / MU_EARTH)
+                if a_cur > 0:
+                    n_m = np.sqrt(MU_EARTH / a_cur**3)
+                    cur_coe = state_to_coe(StateVector(r=r_vec, v=v_vec), MU_EARTH)
+                    new_th = (cur_coe.theta + np.degrees(n_m * dt)) % 360.0
+                    adv_coe = OrbitalElements(
+                        a=cur_coe.a,
+                        e=cur_coe.e,
+                        i=cur_coe.i,
+                        raan=cur_coe.raan,
+                        omega=cur_coe.omega,
+                        theta=new_th,
+                    )
+                    sv2 = coe_to_state(adv_coe, MU_EARTH)
+                    r_vec = np.array(sv2.r)
+                    v_vec = np.array(sv2.v)
+            # Apply burn
+            dv_mag = float(burn.dv_magnitude)
+            direction = str(burn.direction)
+            r_hat = r_vec / np.linalg.norm(r_vec)
+            v_hat = v_vec / np.linalg.norm(v_vec)
+            h_vec = np.cross(r_vec, v_vec)
+            h_hat = h_vec / np.linalg.norm(h_vec)
+            if direction == "prograde":
+                dv_vec = v_hat * dv_mag
+            elif direction == "retrograde":
+                dv_vec = -v_hat * dv_mag
+            elif direction == "normal":
+                dv_vec = h_hat * dv_mag
+            elif direction == "antinormal":
+                dv_vec = -h_hat * dv_mag
+            elif direction == "radial_out":
+                dv_vec = r_hat * dv_mag
+            elif direction == "radial_in":
+                dv_vec = -r_hat * dv_mag
+            else:
+                dv_vec = v_hat * dv_mag
+            v_vec = v_vec + dv_vec
+            last_t = bt
+
+        # Compute post-burn semi-major axis
+        r_mag = np.linalg.norm(r_vec)
+        v_mag = np.linalg.norm(v_vec)
+        post_a = 1.0 / (2.0 / r_mag - v_mag**2 / MU_EARTH)
+        if post_a > 0:
+            post_period = orbital_period(post_a, MU_EARTH)
+        else:
+            post_period = orbit_time  # hyperbolic fallback
+
+        # Ensure at least 1.5 full post-burn orbits after last burn
+        desired_duration = max(total_duration, max_time + 2.5 * post_period)
         return max(n_orbits, desired_duration / orbit_time)
 
     def _request_maneuver_preview(self):
         if self.viewport3d is None:
             return
 
+        self._preview_enabled = True
         self.preview_trajectory = None
         self.viewport3d.clear_preview_trajectory()
 
@@ -858,13 +965,16 @@ class App:
         t_pct = float(dpg.get_value("burn_time_pct"))
         dv = float(dpg.get_value("burn_dv"))
         direction = str(dpg.get_value("burn_dir"))
+        anchor = str(dpg.get_value("burn_anchor"))
         if dv <= 0.0:
             self._log("Burn ignored: dv must be > 0.")
             return
 
+        t_frac = t_pct / 100.0 if anchor == "Percent" else self._burn_time_from_anchor(anchor)
+
         self._maneuver_plan.append(
             ManeuverEvent(
-                time=t_pct / 100.0,
+                time=t_frac,
                 dv_magnitude=dv,
                 direction=direction,
             )
@@ -872,13 +982,166 @@ class App:
         self._maneuver_plan.sort(key=lambda e: e.time)
         self._refresh_burn_plan_display()
         self._request_maneuver_preview()
-        self._log(f"Added burn: t={t_pct:.1f}% dv={dv:.3f} km/s dir={direction}")
+        self._update_burn_cursor()
+        self._log(
+            f"Added burn: t={t_frac * 100.0:.1f}% ({anchor}) dv={dv:.3f} km/s dir={direction}"
+        )
+
+    def _update_burn_cursor(self, sender=None, app_data=None):
+        """Update the burn cursor marker on the 3D viewport."""
+        if self.viewport3d is None:
+            return
+        try:
+            anchor = str(dpg.get_value("burn_anchor"))
+            t_pct = float(dpg.get_value("burn_time_pct"))
+            direction = str(dpg.get_value("burn_dir"))
+
+            if anchor == "Percent":
+                t_frac = t_pct / 100.0
+            else:
+                t_frac = self._burn_time_from_anchor(anchor)
+
+            # Get position on orbit at t_frac, accounting for prior burns
+            a = float(dpg.get_value("coe_a"))
+            e = float(dpg.get_value("coe_e"))
+            i = float(dpg.get_value("coe_i"))
+            raan = float(dpg.get_value("coe_raan"))
+            omega = float(dpg.get_value("coe_omega"))
+            theta0 = float(dpg.get_value("coe_theta"))
+
+            initial_period = orbital_period(a, MU_EARTH)
+            t_abs = t_frac * initial_period
+
+            # Start from initial state
+            coe = OrbitalElements(a=a, e=e, i=i, raan=raan, omega=omega, theta=theta0)
+            sv = coe_to_state(coe, MU_EARTH)
+            r_vec = np.array(sv.r)
+            v_vec = np.array(sv.v)
+
+            # Propagate through existing burns before this time
+            last_t = 0.0
+            sorted_burns = sorted(self._maneuver_plan, key=lambda b: b.time)
+            for burn in sorted_burns:
+                bv = float(burn.time)
+                bt = bv * initial_period if bv <= 50.0 else bv
+                if bt >= t_abs:
+                    break
+                dt = bt - last_t
+                if dt > 0:
+                    r_mag = np.linalg.norm(r_vec)
+                    a_cur = 1.0 / (2.0 / r_mag - np.dot(v_vec, v_vec) / MU_EARTH)
+                    if a_cur > 0:
+                        n_m = np.sqrt(MU_EARTH / a_cur**3)
+                        cur_coe = state_to_coe(StateVector(r=r_vec, v=v_vec), MU_EARTH)
+                        new_th = (cur_coe.theta + np.degrees(n_m * dt)) % 360.0
+                        adv_coe = OrbitalElements(
+                            a=cur_coe.a,
+                            e=cur_coe.e,
+                            i=cur_coe.i,
+                            raan=cur_coe.raan,
+                            omega=cur_coe.omega,
+                            theta=new_th,
+                        )
+                        sv2 = coe_to_state(adv_coe, MU_EARTH)
+                        r_vec = np.array(sv2.r)
+                        v_vec = np.array(sv2.v)
+                # Apply burn
+                dv_m = float(burn.dv_magnitude)
+                d = str(burn.direction)
+                rh = r_vec / np.linalg.norm(r_vec)
+                vh = v_vec / np.linalg.norm(v_vec)
+                hv = np.cross(r_vec, v_vec)
+                hh = hv / np.linalg.norm(hv)
+                if d == "prograde":
+                    dvv = vh * dv_m
+                elif d == "retrograde":
+                    dvv = -vh * dv_m
+                elif d == "normal":
+                    dvv = hh * dv_m
+                elif d == "antinormal":
+                    dvv = -hh * dv_m
+                elif d == "radial_out":
+                    dvv = rh * dv_m
+                elif d == "radial_in":
+                    dvv = -rh * dv_m
+                else:
+                    dvv = vh * dv_m
+                v_vec = v_vec + dvv
+                last_t = bt
+
+            # Propagate remaining time to burn point
+            dt_remaining = t_abs - last_t
+            if dt_remaining > 0:
+                r_mag = np.linalg.norm(r_vec)
+                a_cur = 1.0 / (2.0 / r_mag - np.dot(v_vec, v_vec) / MU_EARTH)
+                if a_cur > 0:
+                    n_m = np.sqrt(MU_EARTH / a_cur**3)
+                    cur_coe = state_to_coe(StateVector(r=r_vec, v=v_vec), MU_EARTH)
+                    new_th = (cur_coe.theta + np.degrees(n_m * dt_remaining)) % 360.0
+                    adv_coe = OrbitalElements(
+                        a=cur_coe.a,
+                        e=cur_coe.e,
+                        i=cur_coe.i,
+                        raan=cur_coe.raan,
+                        omega=cur_coe.omega,
+                        theta=new_th,
+                    )
+                    sv2 = coe_to_state(adv_coe, MU_EARTH)
+                    r_vec = np.array(sv2.r)
+                    v_vec = np.array(sv2.v)
+
+            pos = r_vec
+
+            # Compute direction vector for arrow
+            r_hat = r_vec / np.linalg.norm(r_vec)
+            v_hat = v_vec / np.linalg.norm(v_vec)
+            h_vec = np.cross(r_vec, v_vec)
+            h_hat = h_vec / np.linalg.norm(h_vec)
+            if direction == "prograde":
+                d_hat = v_hat
+            elif direction == "retrograde":
+                d_hat = -v_hat
+            elif direction == "normal":
+                d_hat = h_hat
+            elif direction == "antinormal":
+                d_hat = -h_hat
+            elif direction == "radial_out":
+                d_hat = r_hat
+            elif direction == "radial_in":
+                d_hat = -r_hat
+            else:
+                d_hat = v_hat
+
+            # Arrow length in viewport units (fixed visual size)
+            arrow_len = np.linalg.norm(pos) * 0.15
+            dir_vec = d_hat * arrow_len
+
+            self.viewport3d.set_burn_cursor(pos, dir_vec)
+        except Exception:
+            self.viewport3d.set_burn_cursor(None)
 
     def _clear_burns(self):
         self._maneuver_plan.clear()
         self._refresh_burn_plan_display()
         self._request_maneuver_preview()
         self._log("Cleared planned burns.")
+
+    def _clear_preview_only(self):
+        self._preview_enabled = False
+        self.viewport3d.clear_preview_trajectory()
+        self.viewport3d.clear_transfers()
+        self.viewport3d.set_burn_cursor(None)
+        self._log("Cleared preview overlays.")
+
+    def _remove_burn(self):
+        idx = int(dpg.get_value("burn_remove_idx")) - 1
+        if 0 <= idx < len(self._maneuver_plan):
+            removed = self._maneuver_plan.pop(idx)
+            self._refresh_burn_plan_display()
+            self._request_maneuver_preview()
+            self._log(f"Removed burn #{idx + 1}: dv={removed.dv_magnitude:.4f} {removed.direction}")
+        else:
+            self._log(f"No burn #{idx + 1} to remove.")
 
     def _refresh_burn_plan_display(self):
         if len(self._maneuver_plan) == 0:
@@ -887,12 +1150,122 @@ class App:
 
         lines = []
         for idx, burn in enumerate(self._maneuver_plan, start=1):
-            if 0.0 <= burn.time <= 1.0:
+            if burn.time <= 50.0:
                 when = f"{burn.time * 100.0:5.1f}%"
             else:
                 when = f"{burn.time:7.1f}s"
             lines.append(f"{idx:02d}. t={when}  dv={burn.dv_magnitude:.4f}  {burn.direction}")
         dpg.set_value("burn_plan_text", "\n".join(lines))
+
+    def _burn_time_from_anchor(self, anchor: str) -> float:
+        """Compute the fractional time (0-1 of one initial orbit) for an anchored burn.
+
+        For chained burns, propagates through previous burns to find the
+        correct anchor point on the post-burn orbit.
+        """
+        a0 = float(dpg.get_value("coe_a"))
+        e0 = float(dpg.get_value("coe_e"))
+        i0 = float(dpg.get_value("coe_i"))
+        raan0 = float(dpg.get_value("coe_raan"))
+        omega0 = float(dpg.get_value("coe_omega"))
+        theta0 = float(dpg.get_value("coe_theta"))
+
+        initial_period = orbital_period(a0, MU_EARTH)
+
+        if len(self._maneuver_plan) == 0:
+            # First burn: compute fraction based on initial orbit
+            target_theta = self._anchor_to_theta(anchor, omega0)
+            dtheta = (target_theta - theta0) % 360.0
+            frac = dtheta / 360.0
+            if frac < 1e-6:
+                frac = 1e-4
+            return frac
+
+        # Chained burn: propagate through previous burns to get post-burn state,
+        # then find target anchor on the resulting orbit.
+        coe = OrbitalElements(a=a0, e=e0, i=i0, raan=raan0, omega=omega0, theta=theta0)
+        sv = coe_to_state(coe, MU_EARTH)
+        r_vec = np.array(sv.r)
+        v_vec = np.array(sv.v)
+
+        last_t_abs = 0.0  # absolute time in seconds
+        sorted_burns = sorted(self._maneuver_plan, key=lambda b: b.time)
+        for existing_burn in sorted_burns:
+            t_val = float(existing_burn.time)
+            t_abs = t_val * initial_period if t_val <= 50.0 else t_val
+            # Propagate Keplerian to this time
+            dt = t_abs - last_t_abs
+            if dt > 0:
+                r_mag = np.linalg.norm(r_vec)
+                a_cur = 1.0 / (2.0 / r_mag - np.dot(v_vec, v_vec) / MU_EARTH)
+                if a_cur > 0:
+                    n_motion = np.sqrt(MU_EARTH / a_cur**3)
+                    dM = n_motion * dt
+                    cur_coe = state_to_coe(StateVector(r=r_vec, v=v_vec), MU_EARTH)
+                    new_theta = (cur_coe.theta + np.degrees(dM)) % 360.0
+                    advanced_coe = OrbitalElements(
+                        a=cur_coe.a,
+                        e=cur_coe.e,
+                        i=cur_coe.i,
+                        raan=cur_coe.raan,
+                        omega=cur_coe.omega,
+                        theta=new_theta,
+                    )
+                    sv2 = coe_to_state(advanced_coe, MU_EARTH)
+                    r_vec = np.array(sv2.r)
+                    v_vec = np.array(sv2.v)
+
+            # Apply burn
+            dv_mag = float(existing_burn.dv_magnitude)
+            direction = str(existing_burn.direction)
+            r_hat = r_vec / np.linalg.norm(r_vec)
+            v_hat = v_vec / np.linalg.norm(v_vec)
+            h_vec = np.cross(r_vec, v_vec)
+            h_hat = h_vec / np.linalg.norm(h_vec)
+            if direction == "prograde":
+                dv_vec = v_hat * dv_mag
+            elif direction == "retrograde":
+                dv_vec = -v_hat * dv_mag
+            elif direction == "normal":
+                dv_vec = h_hat * dv_mag
+            elif direction == "antinormal":
+                dv_vec = -h_hat * dv_mag
+            elif direction == "radial_out":
+                dv_vec = r_hat * dv_mag
+            elif direction == "radial_in":
+                dv_vec = -r_hat * dv_mag
+            else:
+                dv_vec = v_hat * dv_mag
+            v_vec = v_vec + dv_vec
+            last_t_abs = t_abs
+
+        # Now r_vec, v_vec is the post-burn state. Find new COE.
+        post_coe = state_to_coe(StateVector(r=r_vec, v=v_vec), MU_EARTH)
+        target_theta = self._anchor_to_theta(anchor, post_coe.omega)
+
+        # Time from last burn to reach target theta on post-burn orbit
+        dtheta = (target_theta - post_coe.theta) % 360.0
+        if dtheta < 1e-6:
+            dtheta = 0.001
+
+        post_a = post_coe.a if post_coe.a > 0 else a0
+        post_period = orbital_period(post_a, MU_EARTH)
+        dt_to_target = (dtheta / 360.0) * post_period
+        t_target_abs = last_t_abs + dt_to_target
+        # Return as fraction of initial orbit period
+        frac = t_target_abs / initial_period
+        return frac
+
+    def _anchor_to_theta(self, anchor: str, omega: float) -> float:
+        if anchor == "Periapsis":
+            return 0.0
+        elif anchor == "Apoapsis":
+            return 180.0
+        elif anchor == "Ascending Node":
+            return (-omega) % 360.0
+        elif anchor == "Descending Node":
+            return (180.0 - omega) % 360.0
+        return 0.0
 
     def _update_burn_events_display(self, burn_events: list[dict]):
         if len(burn_events) == 0:

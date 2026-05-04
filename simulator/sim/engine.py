@@ -101,7 +101,7 @@ class SimulationEngine:
         atol: float,
     ) -> TrajectoryData:
         t0, tf = t_span
-        planned = [m for m in maneuvers if t0 < m.time < tf and m.dv_magnitude > 0.0]
+        planned = [m for m in maneuvers if t0 <= m.time <= tf and m.dv_magnitude > 0.0]
         planned.sort(key=lambda m: m.time)
 
         if len(planned) == 0:
@@ -123,6 +123,11 @@ class SimulationEngine:
         t_curr = t0
 
         for burn in planned:
+            if burn.time <= t_curr + 1e-9:
+                y_curr = self._apply_burn(y_curr, burn)
+                t_curr = max(t_curr, burn.time)
+                continue
+
             result = propagate(
                 eom,
                 y_curr,
