@@ -16,7 +16,13 @@
         "omega": 0.0,
         "theta": 0.0
       },
-      "maneuvers": []
+      "maneuvers": [
+        {
+          "time": 0.0,
+          "dv_magnitude": 0.5,
+          "direction": "retrograde"
+        }
+      ]
     },
     {
       "name": "SC-2",
@@ -33,7 +39,18 @@
         "omega": 270.0,
         "theta": 0.0
       },
-      "maneuvers": []
+      "maneuvers": [
+        {
+          "time": 0.0,
+          "dv_magnitude": 0.5,
+          "direction": "retrograde"
+        },
+        {
+          "time": 0.3013906952968735,
+          "dv_magnitude": 0.49000000953674316,
+          "direction": "retrograde"
+        }
+      ]
     }
   ]
 }

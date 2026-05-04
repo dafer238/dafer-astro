@@ -2464,6 +2464,11 @@ class App:
         self._tab1_multi_result = None
         self._active_sc_name = None
         self._current_file_path = None
+        # Reset engines to prevent stale results from being picked up
+        self.engine = SimulationEngine()
+        self.compare_engine = SimulationEngine()
+        self.preview_engine = SimulationEngine()
+        self.preview_trajectory = None
         if self.viewport3d:
             self.viewport3d.set_multi_trajectories([])
             self.viewport3d.clear_burn_markers()
