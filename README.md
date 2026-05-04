@@ -12,65 +12,120 @@ A high-fidelity orbital mechanics simulator with real-time 3D visualization, mul
 - **J2 oblateness perturbation** for realistic Earth-orbit modeling
 - **Atmospheric drag** with exponential atmosphere model (configurable Cd and ballistic coefficient)
 - **Energy conservation** verified to ~10⁻¹² relative drift
+- **Angular momentum conservation** verified to ~10⁻¹² relative drift
 - **Integrator accuracy**: rtol=1e-10, atol=1e-12
 
 ### Multi-Spacecraft Support
 - Create unlimited spacecraft with individual orbital elements
-- Per-spacecraft color coding and naming
+- Per-spacecraft color coding (Cyan, Green, Red, Yellow, Orange, Purple, White) and naming
 - Select any spacecraft to view/edit its parameters
 - **Update SC** button to modify orbital elements after creation
+- **Delete SC** and **Clear SCs** buttons
+- Click-to-select spacecraft orbit in 3D viewport
 - Simulation duration auto-adjusts to accommodate all spacecraft orbital periods
+- **Closest approach computation** between all spacecraft pairs with 3D line marker
+
+### Orbital Elements Input
+- Classical Orbital Elements (a, e, i, Ω, ω, θ) with fine-control drag inputs
+- **Live orbit preview** — adjusting any COE instantly shows the resulting orbit in green
+- **SC spawn marker** — yellow dot on preview orbit shows spacecraft position at current θ
+- Ctrl+click on any drag field for direct typed input
+- Speed 0.1°/px for angular values (i, RAAN, ω, θ)
+
+### Orbit Presets
+- ISS (6779 km, i=51.6°)
+- GEO (42157 km, circular, equatorial)
+- Molniya (600×39000 km, i=63.4°)
+- SSO (6971 km, i=97.8°)
+- HEO (300×60000 km)
+- GPS/MEO (20200 km, i=55°)
+- Tundra (24h period, e=0.268, i=63.4°)
+- Lunar (TLI to 384400 km)
+- GTO (185×35786 km)
 
 ### Maneuver Planning (KSP-Style)
+
+#### Manual Burns
 - **Impulsive burns** with 6 directions: prograde, retrograde, normal, antinormal, radial out, radial in
-- **Burn timing** via percentage, periapsis, apoapsis, ascending/descending node
-- **Live burn preview** — adjusting any parameter instantly shows the resulting orbit in the viewport
+- **Burn timing** via: At current time, Periapsis, Apoapsis, Ascending Node, Descending Node
+- **Live burn preview** — adjusting dv, direction, or anchor instantly shows the resulting trajectory
 - **Multi-burn sequences** with automatic trajectory segmentation
-- **Burn cursor** showing exact position and direction on the orbit
-- **Hohmann transfer calculator** with automatic two-burn sequences
-- **Inclination change** and **plane change** maneuver presets
+- **Burn cursor** — 3D arrow at burn location showing direction
+- Add/Remove/Clear burn management
+- Burn plan display with numbered sequence
+
+#### Maneuver Templates
+- **Hohmann transfer** — automatic two-burn sequence with transfer arc visualization
+- **Bi-elliptic transfer** — three-burn sequence with two transfer arcs
+- **Plane change** — single normal burn for inclination adjustment
+- **Combined transfer+plane** — Hohmann + plane change at circularization
+- **Circularize** — prograde burn at apoapsis
+- **De-orbit** — retrograde burn lowering periapsis to 80 km
+- **Phasing** — two-burn period adjustment to drift 30°
+- **Rendezvous** — co-planar Hohmann to target altitude
+
+#### Template Controls
+- Target altitude input (auto-updates maneuver preview)
+- Plane change angle input
+- Maneuver anchor selection (At current time, Periapsis, Apoapsis, Ascending/Descending Node)
+
+### Perturbation Modeling
+- **J2 oblateness** (with computed RAAN/argument of periapsis drift rates)
+- **Atmospheric drag** (configurable Cd 1.5–3.5, ballistic coefficient)
+- **Moon gravity** (third-body perturbation)
+- **Sun gravity** (third-body perturbation)
+- All independently toggleable per simulation
 
 ### Real-Time 3D Visualization
 - Interactive 3D viewport with mouse orbit, pan, and zoom
-- **Central body rendering** with proper differentiation:
-  - Earth: blue sphere with continents and latitude/longitude grid
-  - Moon: gray sphere
-  - Other planets: colored spheres at proportional scale
-- **Orbit annotations**: periapsis, apoapsis, ascending/descending nodes
+- **Central body rendering** with proper visual differentiation (Earth blue, Moon gray, etc.)
+- **Orbit annotations**: periapsis (P), apoapsis (A), ascending/descending nodes
 - **Multiple trajectory rendering** with per-spacecraft colors
 - **Satellite markers** on all active spacecraft (animated during playback)
-- **Closest approach line** with distance label between spacecraft
-- **Preview orbit** (green) updates live as you adjust COE sliders
-- **Transfer trajectory** visualization (yellow)
+- **Closest approach line** with distance label between spacecraft pairs
+- **Preview orbit** (green) with SC spawn position marker (yellow)
+- **Transfer trajectory** visualization (yellow arcs)
 - **Burn markers** (orange dots) at maneuver locations
-- View presets: Isometric, XY (ecliptic), XZ, body-specific zoom
+- **Burn direction cursor** (3D arrow at burn point)
+- **Reference/compare trajectory** overlay
+
+#### View Presets
+- Isometric, XY (ecliptic top-down), XZ, YZ plane views
+- Orbit-normal view, Velocity-track view, Nadir view
+- Auto-fit to content
+
+### Timeline & Playback
+- Play/Pause with variable time warp (1x → 50,000x)
+- Timeline scrub slider
+- Time display with human-readable format (Xy Xm Xd HH:MM)
+- Reset to t=0
+
+### Telemetry Panel
+- Real-time display at current time step:
+  - Altitude, Velocity, Orbital Period, Specific Energy
+  - Semi-major axis, Eccentricity, Inclination, RAAN, Argument of Periapsis, True Anomaly
+
+### 2D Plots
+- **Altitude vs Time** with vertical cursor line
+- **Velocity vs Time** with vertical cursor line
+- Cursor follows playback/scrub position
+
+### Comparison Mode
+- Toggle compare mode to overlay burn vs. no-burn trajectory
+- Displays final differences: delta altitude, delta velocity, position miss
 
 ### Two-Tab Interface
 
 #### Tab 1: Orbital / Rendezvous
-- Classical Orbital Elements input (a, e, i, Ω, ω, θ) with live orbit preview
-- Multi-spacecraft builder with add/update/clear/select
-- Full burn planning with live preview
-- Perturbation toggles (J2, drag, Moon, Sun)
-- Central body selector (Earth, Moon, Sun, Mars, Jupiter, etc.)
-- Time warp: 1x → 50,000x
-- Telemetry panel: altitude, velocity, orbital energy, period, elements
-- Closest approach computation between all spacecraft pairs
-- Comparison mode (burn vs. no-burn overlay)
-- Orbit info panel with periapsis/apoapsis altitudes
+Full orbital mechanics simulation with all features above.
 
 #### Tab 2: Interplanetary / Multi-Body
 - Full solar system ephemeris (Standish 1992 elements) for any date
 - Multi-body propagation with N gravitational sources
 - Spacecraft builder with custom COE per craft
-- **Planet orbit visualization** — all planets Mercury→Saturn with full orbital paths
+- **Planet orbit visualization** — Mercury through Saturn with full orbital paths
 - **Proportional body rendering** via perspective limb-point projection
-- View presets:
-  - **Earth**: Low-Earth orbit scale with Moon orbit path
-  - **Moon**: Camera centers on Moon's ephemeris position (close-up)
-  - **Mars**: Inner solar system scale
-  - **Jupiter**: Outer planet scale
-  - **Solar System**: Full system view (Mercury to Saturn)
+- View presets: Earth (LEO scale), Moon (close-up), Mars (inner system), Jupiter (outer), Solar System (full)
 - Epoch selector (any date/time UTC)
 - Perturbing body selection
 - Telemetry and relative distance panels
@@ -81,13 +136,22 @@ A high-fidelity orbital mechanics simulator with real-time 3D visualization, mul
 - Covers: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune
 - Moon geocentric position (Brown's lunar theory simplified)
 - Ecliptic-to-equatorial coordinate transformation
-- Julian Date conversion from datetime
+
+### File Management
+- **New** — start fresh (with unsaved-changes prompt)
+- **Open** — load simulation from JSON file
+- **Save / Save As** — serialize all spacecraft, orbits, burns, and settings to JSON
+- Unsaved changes detection with save/discard/cancel prompt
 
 ### Export & Analysis
-- CSV trajectory export (time, position, velocity)
-- Matplotlib orbit plots
-- Energy/angular momentum conservation validation
-- Post-burn orbital element computation
+- **CSV trajectory export** (time, position, velocity)
+- **PNG plot export** via Matplotlib
+- Energy/angular momentum conservation validation logged to console
+- Post-burn orbital element computation with cumulative ΔV tracking
+
+### Console
+- Built-in console log (last 50 messages)
+- Reports: computation progress, conservation metrics, export paths, errors, burn events
 
 ## Installation
 
@@ -99,7 +163,7 @@ pip install -r requirements.txt
 - Python 3.11+
 - NumPy ≥ 1.24
 - SciPy ≥ 1.11 (solve_ivp with DOP853)
-- DearPyGui ≥ 1.11
+- DearPyGui ≥ 2.0
 - Matplotlib (for export plots)
 
 ## Usage
@@ -144,9 +208,11 @@ simulator/
 | Rotate view | Left-click drag |
 | Zoom | Scroll wheel |
 | Pan | Right-click drag |
-| Play/Pause | Play button or timeline |
+| Play/Pause | Play button |
 | Time warp | Speed dropdown (1x–50,000x) |
 | Scrub time | Timeline slider |
+| Clear preview | Escape key |
+| Direct value input | Ctrl+click on drag fields |
 
 ## Verification
 
