@@ -224,6 +224,14 @@ class InterplanetaryTab:
                     label="Moon Transfer", callback=self._preset_moon_transfer, width=105
                 )
                 dpg.add_button(label="LEO pair", callback=self._preset_leo_pair, width=75)
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Mars Hohmann", callback=self._preset_mars_transfer, width=105)
+                dpg.add_button(label="Venus", callback=self._preset_venus_transfer, width=60)
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label="GPS Const.", callback=self._preset_gps_constellation, width=90
+                )
+                dpg.add_button(label="Asteroid", callback=self._preset_asteroid, width=70)
 
             dpg.add_spacer(height=4)
             dpg.add_input_text(
@@ -741,3 +749,97 @@ class InterplanetaryTab:
         dpg.set_value("ipt_duration_days", 0.0625)  # ~1.5 hours
         self._refresh_sc_list()
         self._log("Loaded LEO rendezvous pair preset")
+
+    def _preset_mars_transfer(self):
+        """Earth-Mars Hohmann transfer orbit (heliocentric)."""
+        self._spacecraft_list = [
+            {
+                "name": "Mars-Probe",
+                "color": (0, 200, 255),
+                "coe": OrbitalElements(
+                    a=(AU + 1.524 * AU) / 2,  # Hohmann semi-major axis
+                    e=(1.524 * AU - AU) / (1.524 * AU + AU),
+                    i=1.85,
+                    raan=49.6,
+                    omega=286.5,
+                    theta=0,
+                ),
+            },
+        ]
+        dpg.set_value("ipt_central_body", "Sun")
+        dpg.set_value("ipt_duration_days", 260.0)  # ~8.5 months transfer
+        self._refresh_sc_list()
+        self._log("Loaded Mars Hohmann transfer (heliocentric)")
+
+    def _preset_venus_transfer(self):
+        """Earth-Venus Hohmann transfer orbit (heliocentric)."""
+        r_venus = 0.723 * AU
+        self._spacecraft_list = [
+            {
+                "name": "Venus-Probe",
+                "color": (255, 200, 50),
+                "coe": OrbitalElements(
+                    a=(AU + r_venus) / 2,
+                    e=(AU - r_venus) / (AU + r_venus),
+                    i=3.4,
+                    raan=76.7,
+                    omega=55.0,
+                    theta=180,
+                ),
+            },
+        ]
+        dpg.set_value("ipt_central_body", "Sun")
+        dpg.set_value("ipt_duration_days", 146.0)  # ~4.8 months
+        self._refresh_sc_list()
+        self._log("Loaded Venus Hohmann transfer (heliocentric)")
+
+    def _preset_gps_constellation(self):
+        """GPS-like constellation: 4 spacecraft in 2 planes."""
+        a_gps = R_EARTH + 20200.0
+        self._spacecraft_list = [
+            {
+                "name": "GPS-A1",
+                "color": (0, 255, 100),
+                "coe": OrbitalElements(a=a_gps, e=0.0, i=55.0, raan=0, omega=0, theta=0),
+            },
+            {
+                "name": "GPS-A2",
+                "color": (0, 200, 100),
+                "coe": OrbitalElements(a=a_gps, e=0.0, i=55.0, raan=0, omega=0, theta=90),
+            },
+            {
+                "name": "GPS-B1",
+                "color": (100, 100, 255),
+                "coe": OrbitalElements(a=a_gps, e=0.0, i=55.0, raan=60, omega=0, theta=45),
+            },
+            {
+                "name": "GPS-B2",
+                "color": (80, 80, 220),
+                "coe": OrbitalElements(a=a_gps, e=0.0, i=55.0, raan=60, omega=0, theta=135),
+            },
+        ]
+        dpg.set_value("ipt_central_body", "Earth")
+        dpg.set_value("ipt_duration_days", 1.0)  # 1 day
+        self._refresh_sc_list()
+        self._log("Loaded GPS constellation (4 SC, 2 planes)")
+
+    def _preset_asteroid(self):
+        """Near-Earth asteroid intercept (heliocentric, highly eccentric)."""
+        self._spacecraft_list = [
+            {
+                "name": "Interceptor",
+                "color": (255, 100, 0),
+                "coe": OrbitalElements(
+                    a=1.2 * AU,
+                    e=0.35,
+                    i=12.0,
+                    raan=140,
+                    omega=60,
+                    theta=0,
+                ),
+            },
+        ]
+        dpg.set_value("ipt_central_body", "Sun")
+        dpg.set_value("ipt_duration_days", 400.0)
+        self._refresh_sc_list()
+        self._log("Loaded asteroid intercept orbit (heliocentric)")

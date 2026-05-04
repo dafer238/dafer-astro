@@ -196,6 +196,10 @@ class Viewport3D:
         self._current_time = 0.0
         self._dragging = False
         self._last_mouse = (0.0, 0.0)
+        self._click_start = None
+        self._selected_orbit: str | None = None
+        self._satellite_color: tuple[int, int, int] = (255, 255, 0)
+        self._on_orbit_selected_cb = None
         self._needs_redraw = True
         self._multi_trajectories: list[tuple[np.ndarray, tuple[int, int, int, int], str]] = []
         self._extra_bodies: list[tuple[np.ndarray, float, tuple[int, int, int], str]] = []
@@ -241,6 +245,10 @@ class Viewport3D:
         self._current_time = traj.t[0]
         self._needs_redraw = True
 
+    def set_satellite_color(self, color: tuple[int, int, int]):
+        self._satellite_color = color
+        self._needs_redraw = True
+
     def set_multi_trajectories(
         self, trajectories: list[tuple[TrajectoryData, tuple[int, int, int], str]]
     ):
@@ -276,6 +284,45 @@ class Viewport3D:
     def clear_orbit_paths(self):
         self._orbit_paths = []
         self._needs_redraw = True
+
+    def set_orbit_selected_callback(self, cb):
+        """Set callback(name: str) called when user clicks an orbit."""
+        self._on_orbit_selected_cb = cb
+
+    def _try_select_orbit(self, mx, my):
+        """Hit-test click position against multi-trajectory orbits."""
+        if not self._multi_trajectories:
+            return
+        view = self.camera.view_matrix()
+        proj = perspective_matrix(45, self.width / self.height, 100, self.camera.distance * 5)
+        # Convert global mouse coords to local drawlist coords
+        try:
+            dl_x0, dl_y0 = dpg.get_item_rect_min(self.tag)
+        except Exception:
+            return
+        lx = mx - dl_x0
+        ly = my - dl_y0
+
+        best_name = None
+        best_dist = 25.0  # pixel threshold for selection
+
+        for orbit_pts, color, name in self._multi_trajectories:
+            screen = project_points(orbit_pts, view, proj, self.width, self.height)
+            # Check minimum distance from click to any point on this orbit
+            valid = screen[:, 0] > -5000
+            for i in range(0, len(screen), 3):  # Sample every 3rd point for speed
+                if not valid[i]:
+                    continue
+                d = np.sqrt((screen[i, 0] - lx) ** 2 + (screen[i, 1] - ly) ** 2)
+                if d < best_dist:
+                    best_dist = d
+                    best_name = name
+
+        if best_name is not None:
+            self._selected_orbit = best_name
+            self._needs_redraw = True
+            if self._on_orbit_selected_cb:
+                self._on_orbit_selected_cb(best_name)
 
     def add_transfer_trajectory(
         self, traj: TrajectoryData, color: tuple[int, int, int, int] = (255, 255, 0, 200)
@@ -344,6 +391,7 @@ class Viewport3D:
             dpg.add_mouse_release_handler(button=0, callback=self._on_release)
             dpg.add_mouse_drag_handler(button=0, callback=self._on_drag)
             dpg.add_mouse_wheel_handler(callback=self._on_wheel)
+            dpg.add_key_press_handler(key=dpg.mvKey_Escape, callback=self._on_escape)
 
     def _is_mouse_over_drawlist(self) -> bool:
         if not dpg.does_item_exist(self.tag):
@@ -360,9 +408,18 @@ class Viewport3D:
         if self._is_mouse_over_drawlist():
             self._dragging = True
             self._last_mouse = dpg.get_mouse_pos(local=False)
+            self._click_start = self._last_mouse
 
     def _on_release(self, sender, app_data):
+        if self._click_start is not None:
+            mx, my = dpg.get_mouse_pos(local=False)
+            dx = abs(mx - self._click_start[0])
+            dy = abs(my - self._click_start[1])
+            if dx < 5 and dy < 5 and self._is_mouse_over_drawlist():
+                # This was a click, not a drag — try orbit selection
+                self._try_select_orbit(mx, my)
         self._dragging = False
+        self._click_start = None
 
     def _on_drag(self, sender, app_data):
         if not self._dragging:
@@ -382,6 +439,12 @@ class Viewport3D:
             return
         self.camera.zoom(0.85 if app_data > 0 else 1.18)
         self._needs_redraw = True
+
+    def _on_escape(self, sender=None, app_data=None):
+        """Deselect all orbits."""
+        if self._selected_orbit is not None:
+            self._selected_orbit = None
+            self._needs_redraw = True
 
     def set_view_xy(self):
         self.camera.azimuth = 0.0
@@ -636,27 +699,37 @@ class Viewport3D:
     def _draw_multi_trajectories(self, view, proj):
         """Draw multiple named/colored spacecraft trajectories."""
         for orbit_pts, color, name in self._multi_trajectories:
+            # Skip orbit that's already drawn as the primary trajectory
+            if name == self._selected_orbit and self._trajectory is not None:
+                continue
             screen = project_points(orbit_pts, view, proj, self.width, self.height)
             valid = screen[:, 0] > -5000
+            is_selected = name == self._selected_orbit
+            thickness = 3.0 if is_selected else 1.5
+            draw_color = (255, 255, 255, 255) if is_selected else color
             pts = []
             for i in range(len(screen)):
                 if valid[i]:
                     pts.append((float(screen[i, 0]), float(screen[i, 1])))
                 else:
                     if len(pts) > 1:
-                        dpg.draw_polyline(pts, parent=self.tag, color=color, thickness=1.5)
+                        dpg.draw_polyline(
+                            pts, parent=self.tag, color=draw_color, thickness=thickness
+                        )
                     pts = []
             if len(pts) > 1:
-                dpg.draw_polyline(pts, parent=self.tag, color=color, thickness=1.5)
+                dpg.draw_polyline(pts, parent=self.tag, color=draw_color, thickness=thickness)
             # Draw label at last valid point
             if len(pts) > 0:
                 lx, ly = pts[-1]
+                label_color = (255, 255, 255, 255) if is_selected else color[:3] + (200,)
+                label = f"► {name}" if is_selected else name
                 dpg.draw_text(
                     (lx + 5, ly - 4),
-                    name,
+                    label,
                     parent=self.tag,
-                    color=color[:3] + (200,),
-                    size=10,
+                    color=label_color,
+                    size=11 if is_selected else 10,
                 )
 
     def _draw_orbit_paths(self, view, proj):
@@ -699,11 +772,28 @@ class Viewport3D:
     def _draw_orbit_annotations(self, view, proj):
         if self._orbit_points is None or len(self._orbit_points) < 8:
             return
+        if self._trajectory is None:
+            return
 
-        # Use last third of trajectory (final orbit after burns) for annotations.
+        # Compute periapsis/apoapsis from last orbit revolution
+        # Walk backwards one full orbit using angular distance
         n = len(self._orbit_points)
-        start = max(0, n - n // 3)
-        r = self._orbit_points[start:]
+        cum_angle = 0.0
+        orbit_start = 0
+        for i in range(n - 1, 0, -1):
+            r1 = self._orbit_points[i - 1]
+            r2 = self._orbit_points[i]
+            n1 = np.linalg.norm(r1)
+            n2 = np.linalg.norm(r2)
+            if n1 < 1e-10 or n2 < 1e-10:
+                continue
+            cos_a = np.clip(np.dot(r1, r2) / (n1 * n2), -1.0, 1.0)
+            cum_angle += np.arccos(cos_a)
+            if cum_angle >= 2 * np.pi:
+                orbit_start = i
+                break
+
+        r = self._orbit_points[orbit_start:]
         if len(r) < 4:
             r = self._orbit_points
 
@@ -968,15 +1058,16 @@ class Viewport3D:
         if screen[0, 0] < -5000:
             return
         cx, cy = screen[0]
+        sc = self._satellite_color
         dpg.draw_circle(
             (cx, cy),
             5,
             parent=self.tag,
-            color=(255, 255, 0, 255),
-            fill=(255, 255, 0, 220),
+            color=(*sc, 255),
+            fill=(*sc, 220),
             thickness=1,
         )
-        dpg.draw_circle((cx, cy), 9, parent=self.tag, color=(255, 255, 0, 80), thickness=1)
+        dpg.draw_circle((cx, cy), 9, parent=self.tag, color=(*sc, 80), thickness=1)
 
         # Draw markers for all multi-trajectory spacecraft
         for orbit_pts, color, name in self._multi_trajectories:

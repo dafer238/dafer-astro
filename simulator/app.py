@@ -46,6 +46,7 @@ class App:
         self._preview_enabled = True
         self._console_lines: list[str] = []
         self._maneuver_plan: list[ManeuverEvent] = []
+        self._active_sc_name: str | None = None
         self._left_panel_width = 280
         self._right_panel_width = 300
         self._bottom_panel_height = 140
@@ -120,6 +121,11 @@ class App:
             with dpg.group(horizontal=True):
                 dpg.add_button(label="SSO", callback=self._preset_sso, width=55)
                 dpg.add_button(label="HEO", callback=self._preset_heo, width=55)
+                dpg.add_button(label="GPS", callback=self._preset_gps, width=55)
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Tundra", callback=self._preset_tundra, width=60)
+                dpg.add_button(label="Lunar", callback=self._preset_lunar, width=55)
+                dpg.add_button(label="GTO", callback=self._preset_gto, width=55)
 
             dpg.add_spacer(height=6)
             dpg.add_text("Central Body:", color=(150, 150, 150))
@@ -143,15 +149,9 @@ class App:
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Add SC", callback=self._add_sc_tab1, width=70)
                 dpg.add_button(label="Update SC", callback=self._update_sc_tab1, width=75)
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Delete SC", callback=self._delete_sc_tab1, width=75)
                 dpg.add_button(label="Clear SCs", callback=self._clear_sc_tab1, width=70)
-            dpg.add_combo(
-                [],
-                default_value="",
-                tag="active_sc_select",
-                width=140,
-                label="Active SC",
-                callback=self._on_active_sc_change,
-            )
             dpg.add_input_text(
                 tag="sc_list_display",
                 multiline=True,
@@ -299,6 +299,12 @@ class App:
                 dpg.add_button(
                     label="Transfer+Plane", callback=self._template_transfer_plane, width=110
                 )
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Circularize", callback=self._template_circularize, width=85)
+                dpg.add_button(label="De-orbit", callback=self._template_deorbit, width=70)
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Phasing", callback=self._template_phasing, width=70)
+                dpg.add_button(label="Rendezvous", callback=self._template_rendezvous, width=85)
             dpg.add_checkbox(label="Compare vs no-burn", tag="compare_mode", default_value=True)
             dpg.add_text("", tag="maneuver_info", color=(200, 200, 200), wrap=240)
 
@@ -373,6 +379,18 @@ class App:
 
             self.viewport3d = Viewport3D("viewport_drawlist", width=780, height=540)
             self.viewport3d.create("center_panel")
+            self.viewport3d.set_orbit_selected_callback(self._on_orbit_clicked)
+
+            dpg.add_spacer(height=2)
+            with dpg.group(horizontal=True):
+                dpg.add_text("Active:", color=(200, 200, 200))
+                dpg.add_combo(
+                    [],
+                    default_value="",
+                    tag="active_sc_select",
+                    width=120,
+                    callback=self._on_active_sc_change,
+                )
 
             dpg.add_spacer(height=4)
             dpg.add_text("View Presets:", color=(150, 150, 150))
@@ -553,6 +571,14 @@ class App:
                     body_name=self._get_central_body().name,
                     body_color=self._get_body_color(self._get_central_body().name),
                 )
+                # Set satellite color based on active SC
+                active_name = dpg.get_value("active_sc_select")
+                for sc in self._tab1_spacecraft:
+                    if sc["name"] == active_name:
+                        self.viewport3d.set_satellite_color(sc["color"])
+                        break
+                else:
+                    self.viewport3d.set_satellite_color((0, 191, 255))
                 self.viewport3d.clear_transfers()
                 burn_events = self.engine.burn_events
                 if len(burn_events) > 0:
@@ -576,6 +602,15 @@ class App:
                 # Now compute closest approach (primary result is ready)
                 if self._tab1_multi_result is not None:
                     self._compute_closest_approach_deferred()
+                # Update multi-trajectory for active SC with burn result
+                active_name = dpg.get_value("active_sc_select")
+                if active_name and self.viewport3d:
+                    self._update_multi_traj_for_active(active_name, result)
+                    # Store trajectory in SC data
+                    for sc in self._tab1_spacecraft:
+                        if sc["name"] == active_name:
+                            sc["trajectory"] = result
+                            break
             elif self.engine.error:
                 self._log(f"ERROR: {self.engine.error}")
 
@@ -587,6 +622,7 @@ class App:
             self.viewport3d.set_time(self.current_time)
             self._update_telemetry()
             self._update_time_display()
+            self._update_plot_cursor()
 
         if self.viewport3d:
             self.viewport3d.render()
@@ -623,9 +659,15 @@ class App:
                 name = name + f"_{len(self._tab1_spacecraft) + 1}"
                 break
 
-        self._tab1_spacecraft.append({"name": name, "color": color, "coe": coe})
+        self._tab1_spacecraft.append(
+            {"name": name, "color": color, "coe": coe, "maneuvers": [], "trajectory": None}
+        )
         self._refresh_tab1_sc_list()
+        # Auto-cycle name and color
+        color_cycle = ["Cyan", "Green", "Red", "Yellow", "Orange", "Purple", "White"]
+        next_idx = len(self._tab1_spacecraft) % len(color_cycle)
         dpg.set_value("sc_name_input", f"SC-{len(self._tab1_spacecraft) + 1}")
+        dpg.set_value("sc_color_input", color_cycle[next_idx])
         self._log(f"Added spacecraft: {name}")
 
     def _update_sc_tab1(self):
@@ -653,7 +695,29 @@ class App:
         self._tab1_multi_result = None
         self._refresh_tab1_sc_list()
         self.viewport3d.clear_multi_trajectories()
+        self.viewport3d.clear_closest_approach_line()
+        # Reset name and color
+        dpg.set_value("sc_name_input", "SC-1")
+        dpg.set_value("sc_color_input", "Cyan")
         self._log("Cleared extra spacecraft.")
+
+    def _delete_sc_tab1(self):
+        """Delete the currently selected spacecraft."""
+        name = dpg.get_value("active_sc_select")
+        if not name:
+            self._log("No SC selected to delete.")
+            return
+        self._tab1_spacecraft = [sc for sc in self._tab1_spacecraft if sc["name"] != name]
+        self._tab1_multi_result = None
+        self.viewport3d.clear_multi_trajectories()
+        self.viewport3d.clear_closest_approach_line()
+        self._refresh_tab1_sc_list()
+        # Cycle back name and color
+        color_cycle = ["Cyan", "Green", "Red", "Yellow", "Orange", "Purple", "White"]
+        next_idx = len(self._tab1_spacecraft) % len(color_cycle)
+        dpg.set_value("sc_name_input", f"SC-{len(self._tab1_spacecraft) + 1}")
+        dpg.set_value("sc_color_input", color_cycle[next_idx])
+        self._log(f"Deleted spacecraft: {name}")
 
     def _refresh_tab1_sc_list(self):
         if not self._tab1_spacecraft:
@@ -673,6 +737,24 @@ class App:
     def _on_active_sc_change(self, sender=None, app_data=None, user_data=None):
         """When user selects a different SC, load its COE into the sliders."""
         name = dpg.get_value("active_sc_select")
+        self._select_sc_by_name(name)
+
+    def _on_orbit_clicked(self, name: str):
+        """Called when user clicks an orbit in the 3D viewport."""
+        dpg.set_value("active_sc_select", name)
+        self._select_sc_by_name(name)
+
+    def _select_sc_by_name(self, name: str):
+        """Select a SC by name: load COE, maneuvers, swap trajectory, update telemetry."""
+        # Save current maneuvers to previously active SC
+        prev_name = getattr(self, "_active_sc_name", None)
+        if prev_name:
+            for sc in self._tab1_spacecraft:
+                if sc["name"] == prev_name:
+                    sc["maneuvers"] = list(self._maneuver_plan)
+                    break
+        self._active_sc_name = name
+
         for sc in self._tab1_spacecraft:
             if sc["name"] == name:
                 coe = sc["coe"]
@@ -683,6 +765,41 @@ class App:
                 dpg.set_value("coe_omega", coe.omega)
                 dpg.set_value("coe_theta", coe.theta)
                 self._on_coe_change()
+                # Load this SC's maneuvers
+                self._maneuver_plan = list(sc.get("maneuvers", []))
+                self._refresh_burn_plan_display()
+                # Use stored trajectory if available, else multi_result, else engine
+                traj = sc.get("trajectory")
+                if traj is None and self._tab1_multi_result is not None:
+                    traj = self._tab1_multi_result.get_trajectory(name)
+                if traj is not None:
+                    self.trajectory = traj
+                    self.viewport3d.set_trajectory(
+                        traj,
+                        self._get_central_body().radius,
+                        body_name=self._get_central_body().name,
+                        body_color=self._get_body_color(self._get_central_body().name),
+                    )
+                    self.current_time = min(self.current_time, traj.t[-1])
+                    dpg.configure_item("time_slider", max_value=traj.duration)
+                    dpg.set_value("time_slider", self.current_time)
+                elif self.trajectory is not None:
+                    self.viewport3d.set_trajectory(
+                        self.trajectory,
+                        self._get_central_body().radius,
+                        body_name=self._get_central_body().name,
+                        body_color=self._get_body_color(self._get_central_body().name),
+                    )
+                if self.trajectory is not None:
+                    self._update_telemetry()
+                    self._update_plots()
+                    self._update_time_display()
+                # Set satellite color
+                self.viewport3d.set_satellite_color(sc["color"])
+                # Highlight in viewport
+                if self.viewport3d:
+                    self.viewport3d._selected_orbit = name
+                    self.viewport3d._needs_redraw = True
                 break
 
     def _get_central_body(self) -> CelestialBody:
@@ -763,6 +880,7 @@ class App:
         self.preview_trajectory = None
         self.viewport3d.clear_transfers()
         self.viewport3d.clear_preview_trajectory()
+        self.viewport3d.clear_preview_orbit()
         self.viewport3d.clear_reference_trajectory()
         self.viewport3d.clear_burn_markers()
         self.viewport3d.clear_multi_trajectories()
@@ -807,6 +925,7 @@ class App:
         if cfg.third_body_sun:
             perturbers.append("Sun")
 
+        active_name = dpg.get_value("active_sc_select")
         spacecraft = []
         for sc_data in self._tab1_spacecraft:
             spacecraft.append(
@@ -846,49 +965,90 @@ class App:
         self._compute_closest_approach(primary_scenario)
         self._log(f"Computed {len(spacecraft)} additional spacecraft.")
 
+    def _update_multi_traj_for_active(self, active_name: str, result):
+        """Replace multi-trajectory entries for all SC that have stored burn trajectories."""
+        if not self.viewport3d:
+            return
+        new_multi = []
+        for orbit_pts, c, name in self.viewport3d._multi_trajectories:
+            # Check if this SC has a stored trajectory (with burns)
+            sc_traj = None
+            sc_color = None
+            for sc in self._tab1_spacecraft:
+                if sc["name"] == name:
+                    if name == active_name:
+                        sc_traj = result
+                    else:
+                        sc_traj = sc.get("trajectory")
+                    sc_color = sc["color"]
+                    break
+            if sc_traj is not None:
+                pts, _ = sc_traj.downsample(3000)
+                new_multi.append((pts, (*sc_color, 220), name))
+            else:
+                new_multi.append((orbit_pts, c, name))
+        self.viewport3d._multi_trajectories = new_multi
+        self.viewport3d._needs_redraw = True
+
     def _compute_closest_approach_deferred(self):
         """Compute closest approach after primary result is ready."""
         self._compute_closest_approach(None)
 
     def _compute_closest_approach(self, primary_scenario=None):
-        """Compute closest approach between primary SC and additional ones."""
-        if self._tab1_multi_result is None or self.trajectory is None:
+        """Compute closest approach between spacecraft pairs."""
+        if self._tab1_multi_result is None:
             return
 
-        primary_result = self.trajectory
-
-        lines = []
-        best_dist = np.inf
-        best_pa = None
-        best_pb = None
-        for sc_name in self._tab1_multi_result.spacecraft_names:
-            other_traj = self._tab1_multi_result.get_trajectory(sc_name)
-            # Find overlapping time range
+        names = self._tab1_multi_result.spacecraft_names
+        if len(names) < 2:
+            # Compare primary trajectory vs single additional SC
+            if self.trajectory is None or len(names) < 1:
+                return
+            primary_result = self.trajectory
+            other_traj = self._tab1_multi_result.get_trajectory(names[0])
             t_max = min(primary_result.t[-1], other_traj.t[-1])
-            t_samples = np.linspace(0, t_max, min(2000, len(primary_result.t)))
-            min_dist = np.inf
-            min_t = 0.0
-            min_r1 = None
-            min_r2 = None
+            t_samples = np.linspace(0, t_max, 2000)
+            min_dist, min_t, min_r1, min_r2 = np.inf, 0.0, None, None
             for t in t_samples:
                 r1, _ = primary_result.interpolate(t)
                 r2, _ = other_traj.interpolate(t)
                 d = np.linalg.norm(r1 - r2)
                 if d < min_dist:
-                    min_dist = d
-                    min_t = t
-                    min_r1 = r1.copy()
-                    min_r2 = r2.copy()
-            lines.append(f"Closest to {sc_name}: {min_dist:.2f} km @ t={min_t:.0f}s")
-            if min_dist < best_dist:
-                best_dist = min_dist
-                best_pa = min_r1
-                best_pb = min_r2
+                    min_dist, min_t = d, t
+                    min_r1, min_r2 = r1.copy(), r2.copy()
+            dpg.set_value(
+                "closest_approach_text", f"Primary↔{names[0]}: {min_dist:.2f} km @ t={min_t:.0f}s"
+            )
+            if min_r1 is not None:
+                self.viewport3d.set_closest_approach_line(min_r1, min_r2)
+            return
+
+        # Multiple SC: compute pairwise closest approach
+        lines = []
+        best_dist = np.inf
+        best_pa = None
+        best_pb = None
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                traj_a = self._tab1_multi_result.get_trajectory(names[i])
+                traj_b = self._tab1_multi_result.get_trajectory(names[j])
+                t_max = min(traj_a.t[-1], traj_b.t[-1])
+                t_samples = np.linspace(0, t_max, 2000)
+                min_dist, min_t, min_r1, min_r2 = np.inf, 0.0, None, None
+                for t in t_samples:
+                    r1, _ = traj_a.interpolate(t)
+                    r2, _ = traj_b.interpolate(t)
+                    d = np.linalg.norm(r1 - r2)
+                    if d < min_dist:
+                        min_dist, min_t = d, t
+                        min_r1, min_r2 = r1.copy(), r2.copy()
+                lines.append(f"{names[i]}↔{names[j]}: {min_dist:.2f} km @ t={min_t:.0f}s")
+                if min_dist < best_dist:
+                    best_dist = min_dist
+                    best_pa, best_pb = min_r1, min_r2
 
         dpg.set_value("closest_approach_text", "\n".join(lines))
-
-        # Draw closest approach line on viewport
-        if best_pa is not None and best_pb is not None:
+        if best_pa is not None:
             self.viewport3d.set_closest_approach_line(best_pa, best_pb)
 
     def _update_layout(self):
@@ -944,6 +1104,7 @@ class App:
         self.viewport3d.set_time(self.current_time)
         self._update_telemetry()
         self._update_time_display()
+        self._update_plot_cursor()
 
     def _on_time_scrub(self, sender, app_data):
         if self.trajectory is None:
@@ -952,6 +1113,7 @@ class App:
         self.viewport3d.set_time(self.current_time)
         self._update_telemetry()
         self._update_time_display()
+        self._update_plot_cursor()
 
     def _on_speed_change(self, sender, app_data):
         speed_map = {
@@ -1030,13 +1192,35 @@ class App:
         dpg.set_value("tel_omega", f"{coe.omega:.4f} deg")
         dpg.set_value("tel_theta", f"{coe.theta:.2f} deg")
 
+    def _seconds_to_human(self, secs: float) -> str:
+        """Convert seconds to human-readable format: Xy Xm Xd HH:MM."""
+        days_total = secs / 86400.0
+        years = int(days_total // 365.25)
+        rem = days_total - years * 365.25
+        months = int(rem // 30.44)
+        rem -= months * 30.44
+        days = int(rem)
+        hours = int((secs % 86400) // 3600)
+        minutes = int((secs % 3600) // 60)
+        parts = []
+        if years > 0:
+            parts.append(f"{years}y")
+        if months > 0:
+            parts.append(f"{months}m")
+        if days > 0 or not parts:
+            parts.append(f"{days}d")
+        parts.append(f"{hours:02d}:{minutes:02d}")
+        return " ".join(parts)
+
     def _update_time_display(self):
         if self.trajectory is None:
             return
         dur = self.trajectory.duration
+        t_human = self._seconds_to_human(self.current_time)
+        dur_human = self._seconds_to_human(dur)
         dpg.set_value(
             "time_display",
-            f"t = {self.current_time:.1f} s  |  {self.current_time:.1f} / {dur:.1f} s",
+            f"t = {self.current_time:.1f}s ({t_human})  |  {dur:.1f}s ({dur_human})",
         )
 
     def _update_orbit_info(self):
@@ -1074,6 +1258,18 @@ class App:
         dpg.fit_axis_data("alt_y")
         dpg.fit_axis_data("vel_x")
         dpg.fit_axis_data("vel_y")
+        self._update_plot_cursor()
+
+    def _update_plot_cursor(self):
+        """Update vertical time cursor on 2D plots."""
+        if self.trajectory is None:
+            return
+        t_cursor = self.current_time / 60.0  # minutes
+        for tag in ("alt_cursor", "vel_cursor"):
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
+        dpg.add_vline_series([t_cursor], parent="alt_y", tag="alt_cursor")
+        dpg.add_vline_series([t_cursor], parent="vel_y", tag="vel_cursor")
 
     def _calc_hohmann(self):
         a = dpg.get_value("coe_a")
@@ -1358,6 +1554,12 @@ class App:
 
     def _set_maneuver_plan(self, events: list[ManeuverEvent]):
         self._maneuver_plan = sorted(events, key=lambda e: e.time)
+        # Save to active SC
+        active_name = dpg.get_value("active_sc_select")
+        for sc in self._tab1_spacecraft:
+            if sc["name"] == active_name:
+                sc["maneuvers"] = list(self._maneuver_plan)
+                break
         self._refresh_burn_plan_display()
         self._request_maneuver_preview()
 
@@ -1383,6 +1585,12 @@ class App:
         self._refresh_burn_plan_display()
         self._request_maneuver_preview()
         self._update_burn_cursor()
+        # Save burns to active SC
+        active_name = dpg.get_value("active_sc_select")
+        for sc in self._tab1_spacecraft:
+            if sc["name"] == active_name:
+                sc["maneuvers"] = list(self._maneuver_plan)
+                break
         self._log(
             f"Added burn: t={t_frac * 100.0:.1f}% ({anchor}) dv={dv:.3f} km/s dir={direction}"
         )
@@ -1765,6 +1973,7 @@ class App:
         dpg.set_value("coe_omega", 0.0)
         dpg.set_value("coe_theta", 0.0)
         dpg.set_value("n_orbits", 3.0)
+        self._on_coe_change()
 
     def _preset_geo(self):
         dpg.set_value("coe_a", 42157.0)
@@ -1774,6 +1983,7 @@ class App:
         dpg.set_value("coe_omega", 0.0)
         dpg.set_value("coe_theta", 0.0)
         dpg.set_value("n_orbits", 1.0)
+        self._on_coe_change()
 
     def _preset_molniya(self):
         rp = R_EARTH + 600.0
@@ -1787,6 +1997,7 @@ class App:
         dpg.set_value("coe_omega", 270.0)
         dpg.set_value("coe_theta", 0.0)
         dpg.set_value("n_orbits", 2.0)
+        self._on_coe_change()
 
     def _preset_sso(self):
         dpg.set_value("coe_a", 6971.0)
@@ -1796,6 +2007,7 @@ class App:
         dpg.set_value("coe_omega", 0.0)
         dpg.set_value("coe_theta", 0.0)
         dpg.set_value("n_orbits", 5.0)
+        self._on_coe_change()
 
     def _preset_heo(self):
         rp = R_EARTH + 300.0
@@ -1809,6 +2021,150 @@ class App:
         dpg.set_value("coe_omega", 0.0)
         dpg.set_value("coe_theta", 0.0)
         dpg.set_value("n_orbits", 1.0)
+        self._on_coe_change()
+
+    def _preset_gps(self):
+        """GPS constellation: MEO at 20,200 km altitude, 55° inclination."""
+        a = R_EARTH + 20200.0
+        dpg.set_value("coe_a", a)
+        dpg.set_value("coe_e", 0.0)
+        dpg.set_value("coe_i", 55.0)
+        dpg.set_value("coe_raan", 0.0)
+        dpg.set_value("coe_omega", 0.0)
+        dpg.set_value("coe_theta", 0.0)
+        dpg.set_value("n_orbits", 2.0)
+        self._on_coe_change()
+
+    def _preset_tundra(self):
+        """Tundra orbit: 24h period, e=0.268, i=63.4° (Russian comms)."""
+        a = 42164.0  # ~24h period
+        e = 0.268
+        dpg.set_value("coe_a", a)
+        dpg.set_value("coe_e", e)
+        dpg.set_value("coe_i", 63.4)
+        dpg.set_value("coe_raan", 90.0)
+        dpg.set_value("coe_omega", 270.0)
+        dpg.set_value("coe_theta", 0.0)
+        dpg.set_value("n_orbits", 1.0)
+        self._on_coe_change()
+
+    def _preset_lunar(self):
+        """Trans-Lunar Injection: GTO-like orbit reaching Moon distance."""
+        rp = R_EARTH + 185.0
+        ra = 384400.0  # Moon distance
+        a = (rp + ra) / 2.0
+        e = (ra - rp) / (ra + rp)
+        dpg.set_value("coe_a", a)
+        dpg.set_value("coe_e", e)
+        dpg.set_value("coe_i", 28.5)
+        dpg.set_value("coe_raan", 0.0)
+        dpg.set_value("coe_omega", 0.0)
+        dpg.set_value("coe_theta", 0.0)
+        dpg.set_value("n_orbits", 1.0)
+        self._on_coe_change()
+
+    def _preset_gto(self):
+        """Geostationary Transfer Orbit: 185km x 35,786km."""
+        rp = R_EARTH + 185.0
+        ra = R_EARTH + 35786.0
+        a = (rp + ra) / 2.0
+        e = (ra - rp) / (ra + rp)
+        dpg.set_value("coe_a", a)
+        dpg.set_value("coe_e", e)
+        dpg.set_value("coe_i", 28.5)
+        dpg.set_value("coe_raan", 0.0)
+        dpg.set_value("coe_omega", 180.0)
+        dpg.set_value("coe_theta", 0.0)
+        dpg.set_value("n_orbits", 2.0)
+        self._on_coe_change()
+
+    def _template_circularize(self):
+        """Add a prograde burn at apoapsis to circularize the orbit."""
+        e = float(dpg.get_value("coe_e"))
+        a = float(dpg.get_value("coe_a"))
+        if e < 0.001:
+            self._log("Orbit is already circular.")
+            return
+        body = self._get_central_body()
+        ra = a * (1 + e)
+        # Velocity at apoapsis on current orbit
+        v_apo = np.sqrt(body.mu * (2.0 / ra - 1.0 / a))
+        # Velocity for circular orbit at ra
+        v_circ = np.sqrt(body.mu / ra)
+        dv = v_circ - v_apo
+        self._set_maneuver_plan(
+            [ManeuverEvent(time=0.5, dv_magnitude=abs(dv), direction="prograde")]
+        )
+        dpg.set_value(
+            "maneuver_info",
+            f"Circularize at apoapsis: Δv = {abs(dv):.4f} km/s\nFinal orbit: {ra - body.radius:.0f} km circular",
+        )
+        self._log(f"Circularize: dv={abs(dv):.4f} km/s at apoapsis")
+
+    def _template_deorbit(self):
+        """Add a retrograde burn to lower periapsis to ~80 km (re-entry)."""
+        a = float(dpg.get_value("coe_a"))
+        e = float(dpg.get_value("coe_e"))
+        body = self._get_central_body()
+        ra = a * (1 + e)
+        rp_target = body.radius + 80.0  # 80 km altitude for re-entry
+        a_new = (ra + rp_target) / 2.0
+        # Current velocity at apoapsis
+        v_apo = np.sqrt(body.mu * (2.0 / ra - 1.0 / a))
+        # Required velocity at apoapsis for new orbit
+        v_new = np.sqrt(body.mu * (2.0 / ra - 1.0 / a_new))
+        dv = v_apo - v_new
+        self._set_maneuver_plan([ManeuverEvent(time=0.5, dv_magnitude=dv, direction="retrograde")])
+        dpg.set_value(
+            "maneuver_info",
+            f"De-orbit burn: Δv = {dv:.4f} km/s\nNew periapsis: {rp_target - body.radius:.0f} km (re-entry)",
+        )
+        self._log(f"De-orbit: dv={dv:.4f} km/s retrograde at apoapsis")
+
+    def _template_phasing(self):
+        """Phasing maneuver: adjust period to drift ahead/behind by 30°."""
+        a = float(dpg.get_value("coe_a"))
+        body = self._get_central_body()
+        T = orbital_period(a, body.mu)
+        # Drift 30° in one orbit → change period by T * (30/360)
+        dT = T * (30.0 / 360.0)
+        T_new = T - dT  # Shorter period to catch up
+        a_new = (body.mu * (T_new / (2 * np.pi)) ** 2) ** (1.0 / 3.0)
+        # Hohmann-like burn to phasing orbit
+        v1 = np.sqrt(body.mu / a)
+        v_transfer = np.sqrt(body.mu * (2.0 / a - 1.0 / a_new))
+        dv = abs(v_transfer - v1)
+        self._set_maneuver_plan(
+            [
+                ManeuverEvent(time=0.0, dv_magnitude=dv, direction="retrograde"),
+                ManeuverEvent(time=0.5, dv_magnitude=dv, direction="prograde"),
+            ]
+        )
+        dpg.set_value("maneuver_info", f"Phasing: 2 burns × {dv:.4f} km/s\nDrift: 30° in 1 orbit")
+        self._log(f"Phasing maneuver: dv={dv:.4f} km/s each")
+
+    def _template_rendezvous(self):
+        """Co-planar rendezvous: phasing + Hohmann to target altitude."""
+        a = float(dpg.get_value("coe_a"))
+        target_alt = float(dpg.get_value("target_alt"))
+        body = self._get_central_body()
+        r_target = body.radius + target_alt
+        result = hohmann_dv(a, r_target)
+        dv1 = result["dv1"]
+        dv2 = result["dv2"]
+        # Add a phasing component
+        self._set_maneuver_plan(
+            [
+                ManeuverEvent(time=0.25, dv_magnitude=dv1, direction="prograde"),
+                ManeuverEvent(time=0.75, dv_magnitude=dv2, direction="prograde"),
+            ]
+        )
+        dpg.set_value(
+            "maneuver_info",
+            f"Rendezvous via Hohmann:\nBurn 1: {dv1:.4f} km/s\nBurn 2: {dv2:.4f} km/s\n"
+            f"Total Δv: {dv1 + dv2:.4f} km/s",
+        )
+        self._log(f"Rendezvous: Hohmann to {target_alt:.0f} km")
 
 
 def run():
