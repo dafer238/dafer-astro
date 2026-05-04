@@ -209,6 +209,7 @@ class Viewport3D:
         self._closest_approach_line: tuple[np.ndarray, np.ndarray] | None = None
         self._preview_orbit: np.ndarray | None = None
         self._preview_orbit_color: tuple[int, int, int] = (100, 255, 100)
+        self._preview_spawn_pos: np.ndarray | None = None
         self._orbit_paths: list[tuple[np.ndarray, tuple[int, int, int], str]] = []
 
     def set_extra_bodies(self, bodies: list[tuple[np.ndarray, float, tuple[int, int, int], str]]):
@@ -275,15 +276,18 @@ class Viewport3D:
         self._needs_redraw = True
 
     def set_preview_orbit(
-        self, points: np.ndarray | None, color: tuple[int, int, int] = (100, 255, 100)
+        self, points: np.ndarray | None, color: tuple[int, int, int] = (100, 255, 100),
+        spawn_pos: np.ndarray | None = None
     ):
         """Set a lightweight preview orbit (Nx3 array of positions)."""
         self._preview_orbit = points
         self._preview_orbit_color = color
+        self._preview_spawn_pos = spawn_pos
         self._needs_redraw = True
 
     def clear_preview_orbit(self):
         self._preview_orbit = None
+        self._preview_spawn_pos = None
         self._needs_redraw = True
 
     def set_orbit_paths(self, paths: list[tuple[np.ndarray, tuple[int, int, int], str]]):
@@ -851,6 +855,14 @@ class Viewport3D:
                 pts = []
         if len(pts) > 1:
             dpg.draw_polyline(pts, parent=self.tag, color=c, thickness=1.0)
+
+        # Draw spawn position marker
+        if self._preview_spawn_pos is not None:
+            sp = project_points(self._preview_spawn_pos.reshape(1, 3), view, proj, self.width, self.height)
+            if sp[0, 0] > -5000:
+                px, py = float(sp[0, 0]), float(sp[0, 1])
+                dpg.draw_circle((px, py), 5, parent=self.tag, color=(255, 255, 0, 255), fill=(255, 255, 0, 200))
+                dpg.draw_text((px + 8, py - 8), "SC", parent=self.tag, color=(255, 255, 0, 255), size=12)
 
     def _draw_orbit_annotations(self, view, proj):
         if self._orbit_points is None or len(self._orbit_points) < 8:

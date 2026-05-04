@@ -57,6 +57,10 @@ class App:
         self._tab1_spacecraft: list[dict] = []  # [{name, color, coe}]
         self._tab1_multi_result: MultiBodyTrajectory | None = None
         self._last_maneuver_template: str | None = None
+        self._burn_interacted = False  # Only show burn preview after user touches burn UI
+        self._maximized = False
+        self._restore_pos = [100, 100]
+        self._restore_size = [1400, 900]
 
     def run(self):
         dpg.create_context()
@@ -96,7 +100,7 @@ class App:
             no_scrollbar=True,
             no_scroll_with_mouse=True,
         ):
-            with dpg.menu_bar():
+            with dpg.menu_bar(tag="main_menu_bar"):
                 with dpg.menu(label="File"):
                     dpg.add_menu_item(label="New", callback=self._file_new)
                     dpg.add_separator()
@@ -114,12 +118,18 @@ class App:
 
             with dpg.tab_bar(tag="main_tab_bar", callback=self._on_tab_change):
                 with dpg.tab(label="Orbital / Rendezvous", tag="tab_orbital"):
-                    with dpg.child_window(tag="top_panel", border=False, no_scrollbar=True):
-                        with dpg.group(horizontal=True):
-                            self._build_left_panel()
-                            self._build_center_panel()
-                            self._build_right_panel()
-                    self._build_bottom_panel()
+                    with dpg.child_window(
+                        tag="tab_orbital_wrap",
+                        border=False,
+                        no_scrollbar=True,
+                        no_scroll_with_mouse=True,
+                    ):
+                        with dpg.child_window(tag="top_panel", border=False, no_scrollbar=True):
+                            with dpg.group(horizontal=True):
+                                self._build_left_panel()
+                                self._build_center_panel()
+                                self._build_right_panel()
+                        self._build_bottom_panel()
 
                 with dpg.tab(label="Interplanetary / Multi-Body", tag="tab_interplanetary"):
                     with dpg.child_window(tag="ipt_main_panel", border=False):
@@ -223,43 +233,51 @@ class App:
                 format="%.5f",
                 callback=self._on_coe_change,
             )
-            dpg.add_slider_float(
+            dpg.add_drag_float(
                 label="i (deg)",
                 tag="coe_i",
                 default_value=51.6,
                 min_value=0.0,
                 max_value=180.0,
+                clamped=True,
                 width=140,
+                speed=0.1,
                 format="%.2f",
                 callback=self._on_coe_change,
             )
-            dpg.add_slider_float(
+            dpg.add_drag_float(
                 label="RAAN (deg)",
                 tag="coe_raan",
                 default_value=0.0,
                 min_value=0.0,
                 max_value=360.0,
+                clamped=True,
                 width=140,
+                speed=0.1,
                 format="%.2f",
                 callback=self._on_coe_change,
             )
-            dpg.add_slider_float(
+            dpg.add_drag_float(
                 label="omega (deg)",
                 tag="coe_omega",
                 default_value=0.0,
                 min_value=0.0,
                 max_value=360.0,
+                clamped=True,
                 width=140,
+                speed=0.1,
                 format="%.2f",
                 callback=self._on_coe_change,
             )
-            dpg.add_slider_float(
+            dpg.add_drag_float(
                 label="theta (deg)",
                 tag="coe_theta",
                 default_value=0.0,
                 min_value=0.0,
                 max_value=360.0,
+                clamped=True,
                 width=140,
+                speed=0.1,
                 format="%.2f",
                 callback=self._on_coe_change,
             )
@@ -334,7 +352,7 @@ class App:
                 callback=self._on_maneuver_param_change,
             )
             dpg.add_combo(
-                ["Periapsis", "Apoapsis", "Ascending Node", "Descending Node"],
+                ["At current time", "Periapsis", "Apoapsis", "Ascending Node", "Descending Node"],
                 default_value="Periapsis",
                 tag="maneuver_anchor",
                 width=140,
@@ -963,6 +981,7 @@ class App:
             )
 
         self._preview_enabled = False
+        self._burn_interacted = False
         self.trajectory = None
         self.compare_trajectory = None
         self.preview_trajectory = None
@@ -1076,7 +1095,7 @@ class App:
                     sc_color = sc["color"]
                     break
             if sc_traj is not None:
-                n = 3000
+                n = 300
                 if sc_traj.n_points <= n:
                     pts, t_arr = sc_traj.r, sc_traj.t
                 else:
@@ -1190,12 +1209,15 @@ class App:
 
         dpg.configure_item("main_window", pos=(0, 0), width=vw, height=vh)
 
-        # Account for tab bar height (~30px)
-        tab_bar_h = 30
+        # Account for menu bar + tab bar height (~52px)
+        tab_bar_h = 52
         available_h = vh - tab_bar_h
 
         bottom_h = min(max(110, int(available_h * 0.18)), 200)
         top_h = max(220, available_h - bottom_h - 8)
+
+        # Configure the tab wrapper to fill available space
+        dpg.configure_item("tab_orbital_wrap", width=vw - 4, height=available_h - 4)
 
         left_w = min(self._left_panel_width, max(220, int(vw * 0.25)))
         right_w = min(self._right_panel_width, max(240, int(vw * 0.28)))
@@ -1251,8 +1273,12 @@ class App:
         self._update_telemetry()
         self._update_time_display()
         self._update_plot_cursor()
-        # Update burn cursor if anchor is "At current time"
-        if dpg.does_item_exist("burn_anchor") and str(dpg.get_value("burn_anchor")) == "At current time":
+        # Update burn cursor if anchor is "At current time" AND user has interacted with burn UI
+        if (
+            self._burn_interacted
+            and dpg.does_item_exist("burn_anchor")
+            and str(dpg.get_value("burn_anchor")) == "At current time"
+        ):
             self._update_burn_cursor()
             # Also update burn preview if dv > 0
             dv = float(dpg.get_value("burn_dv")) if dpg.does_item_exist("burn_dv") else 0.0
@@ -1286,22 +1312,18 @@ class App:
                 self.viewport3d.clear_preview_orbit()
                 return
             body = self._get_central_body()
+            theta_deg = dpg.get_value("coe_theta")
             # Generate points around the orbit analytically
             thetas = np.linspace(0, 2 * np.pi, 200)
             i = np.radians(i_deg)
             raan = np.radians(raan_deg)
             omega = np.radians(omega_deg)
             p = a * (1 - e**2)
-            positions = []
-            for th in thetas:
-                r_mag = p / (1 + e * np.cos(th))
-                # Perifocal coords
-                x_pf = r_mag * np.cos(th)
-                y_pf = r_mag * np.sin(th)
-                # Rotation to inertial
-                cos_O, sin_O = np.cos(raan), np.sin(raan)
-                cos_i, sin_i = np.cos(i), np.sin(i)
-                cos_w, sin_w = np.cos(omega), np.sin(omega)
+            cos_O, sin_O = np.cos(raan), np.sin(raan)
+            cos_i, sin_i = np.cos(i), np.sin(i)
+            cos_w, sin_w = np.cos(omega), np.sin(omega)
+
+            def _perifocal_to_inertial(x_pf, y_pf):
                 x = (cos_O * cos_w - sin_O * sin_w * cos_i) * x_pf + (
                     -cos_O * sin_w - sin_O * cos_w * cos_i
                 ) * y_pf
@@ -1309,8 +1331,26 @@ class App:
                     -sin_O * sin_w + cos_O * cos_w * cos_i
                 ) * y_pf
                 z = (sin_w * sin_i) * x_pf + (cos_w * sin_i) * y_pf
+                return x, y, z
+
+            positions = []
+            for th in thetas:
+                r_mag = p / (1 + e * np.cos(th))
+                x_pf = r_mag * np.cos(th)
+                y_pf = r_mag * np.sin(th)
+                x, y, z = _perifocal_to_inertial(x_pf, y_pf)
                 positions.append([x, y, z])
-            self.viewport3d.set_preview_orbit(np.array(positions), color=(100, 255, 100))
+
+            # Compute spawn position at theta
+            th_spawn = np.radians(theta_deg)
+            r_spawn = p / (1 + e * np.cos(th_spawn))
+            sx_pf = r_spawn * np.cos(th_spawn)
+            sy_pf = r_spawn * np.sin(th_spawn)
+            spawn_pos = np.array(_perifocal_to_inertial(sx_pf, sy_pf))
+
+            self.viewport3d.set_preview_orbit(
+                np.array(positions), color=(100, 255, 100), spawn_pos=spawn_pos
+            )
         except Exception:
             self.viewport3d.clear_preview_orbit()
 
@@ -1437,7 +1477,13 @@ class App:
     def _get_maneuver_start_time(self) -> float:
         """Get the fractional start time based on the maneuver_anchor dropdown."""
         anchor = str(dpg.get_value("maneuver_anchor"))
-        if anchor == "Periapsis":
+        if anchor == "At current time":
+            a = float(dpg.get_value("coe_a"))
+            period = orbital_period(a, MU_EARTH)
+            if period > 0:
+                return self.current_time / period
+            return 0.0
+        elif anchor == "Periapsis":
             return 0.0
         elif anchor == "Apoapsis":
             return 0.5
@@ -1690,6 +1736,7 @@ class App:
 
     def _on_burn_param_change(self, sender=None, app_data=None, user_data=None):
         """Live update: show preview of current burn params without committing."""
+        self._burn_interacted = True
         self._update_burn_cursor()
         # Build a temporary maneuver plan with current slider values + existing burns
         dv = float(dpg.get_value("burn_dv"))
@@ -1949,12 +1996,14 @@ class App:
 
     def _clear_burns(self):
         self._maneuver_plan.clear()
+        self._burn_interacted = False
         self._refresh_burn_plan_display()
         self._request_maneuver_preview()
         self._log("Cleared planned burns.")
 
     def _clear_preview_only(self):
         self._preview_enabled = False
+        self._burn_interacted = False
         self.viewport3d.clear_preview_trajectory()
         self.viewport3d.clear_transfers()
         self.viewport3d.set_burn_cursor(None)
@@ -2633,6 +2682,23 @@ class App:
 
     def _file_exit(self):
         dpg.stop_dearpygui()
+
+    def _window_minimize(self):
+        dpg.minimize_viewport()
+
+    def _window_maximize(self):
+        if self._maximized:
+            # Restore to previous size/position
+            dpg.set_viewport_pos(self._restore_pos)
+            dpg.set_viewport_width(self._restore_size[0])
+            dpg.set_viewport_height(self._restore_size[1])
+            self._maximized = False
+        else:
+            # Save current state and maximize
+            self._restore_pos = dpg.get_viewport_pos()
+            self._restore_size = [dpg.get_viewport_width(), dpg.get_viewport_height()]
+            dpg.maximize_viewport()
+            self._maximized = True
 
     def _show_about(self):
         if dpg.does_item_exist("about_window"):
