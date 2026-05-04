@@ -36,3 +36,40 @@ def create_theme():
             dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 4)
 
     return global_theme
+
+
+def create_button_themes():
+    """Create themed button styles for different action types."""
+    # Green: add/create actions
+    with dpg.theme() as green_btn:
+        with dpg.theme_component(dpg.mvButton):
+            dpg.add_theme_color(dpg.mvThemeCol_Button, (20, 60, 30))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (30, 100, 45))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (40, 130, 60))
+            dpg.add_theme_color(dpg.mvThemeCol_Text, (140, 255, 140))
+
+    # Red: delete/clear actions
+    with dpg.theme() as red_btn:
+        with dpg.theme_component(dpg.mvButton):
+            dpg.add_theme_color(dpg.mvThemeCol_Button, (60, 20, 20))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (100, 30, 30))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (130, 40, 40))
+            dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 140, 140))
+
+    # Yellow: update/modify actions
+    with dpg.theme() as yellow_btn:
+        with dpg.theme_component(dpg.mvButton):
+            dpg.add_theme_color(dpg.mvThemeCol_Button, (50, 45, 15))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (80, 70, 20))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (110, 95, 30))
+            dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 240, 140))
+
+    # White: compute/primary action
+    with dpg.theme() as white_btn:
+        with dpg.theme_component(dpg.mvButton):
+            dpg.add_theme_color(dpg.mvThemeCol_Button, (200, 200, 210))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (230, 230, 240))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (255, 255, 255))
+            dpg.add_theme_color(dpg.mvThemeCol_Text, (10, 10, 20))
+
+    return {"green": green_btn, "red": red_btn, "yellow": yellow_btn, "white": white_btn}

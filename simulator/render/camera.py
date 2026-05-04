@@ -26,6 +26,32 @@ class Camera:
         self.distance = max(1000.0, self.distance * factor)
         self._dirty = True
 
+    def pan(self, dx: float, dy: float):
+        """Pan the camera target in screen-aligned directions."""
+        eye = self.eye_position
+        forward = self.target - eye
+        forward = forward / np.linalg.norm(forward)
+        world_up = np.array([0.0, 0.0, 1.0])
+        right = np.cross(forward, world_up)
+        r_norm = np.linalg.norm(right)
+        if r_norm < 1e-10:
+            world_up = np.array([0.0, 1.0, 0.0])
+            right = np.cross(forward, world_up)
+            r_norm = np.linalg.norm(right)
+        right = right / r_norm
+        up = np.cross(right, forward)
+        scale = self.distance * 0.001
+        self.target += right * (-dx * scale) + up * (dy * scale)
+        self._dirty = True
+
+    def reset(self):
+        """Reset camera to default position."""
+        self.distance = 20000.0
+        self.azimuth = 0.4
+        self.elevation = 0.5
+        self.target = np.zeros(3)
+        self._dirty = True
+
     @property
     def eye_position(self) -> np.ndarray:
         x = self.distance * np.cos(self.elevation) * np.cos(self.azimuth)

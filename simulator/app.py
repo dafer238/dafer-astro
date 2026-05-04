@@ -3,7 +3,7 @@ import numpy as np
 import time
 import os
 
-from simulator.ui.theme import create_theme
+from simulator.ui.theme import create_theme, create_button_themes
 from simulator.render.viewport3d import Viewport3D
 from simulator.sim.engine import SimulationEngine
 from simulator.sim.scenario import Scenario, PerturbationConfig, ManeuverEvent
@@ -54,6 +54,7 @@ class App:
         self._active_tab = "orbital"
         self._tab1_spacecraft: list[dict] = []  # [{name, color, coe}]
         self._tab1_multi_result: MultiBodyTrajectory | None = None
+        self._last_maneuver_template: str | None = None
 
     def run(self):
         dpg.create_context()
@@ -62,7 +63,10 @@ class App:
         theme = create_theme()
         dpg.bind_theme(theme)
 
+        self._btn_themes = create_button_themes()
+
         self._build_ui()
+        self._apply_button_themes()
 
         dpg.setup_dearpygui()
         dpg.show_viewport()
@@ -88,7 +92,7 @@ class App:
         ):
             with dpg.tab_bar(tag="main_tab_bar", callback=self._on_tab_change):
                 with dpg.tab(label="Orbital / Rendezvous", tag="tab_orbital"):
-                    with dpg.child_window(tag="top_panel", border=False):
+                    with dpg.child_window(tag="top_panel", border=False, no_scrollbar=True):
                         with dpg.group(horizontal=True):
                             self._build_left_panel()
                             self._build_center_panel()
@@ -100,6 +104,20 @@ class App:
                         self._interplanetary_tab.build("ipt_main_panel")
 
         dpg.set_primary_window("main_window", True)
+
+    def _apply_button_themes(self):
+        """Apply color themes to categorized buttons."""
+        t = self._btn_themes
+        # Green: add actions
+        for tag in ("btn_add_sc", "btn_add_burn"):
+            dpg.bind_item_theme(tag, t["green"])
+        # Red: delete/clear actions
+        for tag in ("btn_delete_sc", "btn_clear_sc", "btn_clear_burns", "btn_clear_preview", "btn_remove_burn"):
+            dpg.bind_item_theme(tag, t["red"])
+        # Yellow: update/modify
+        dpg.bind_item_theme("btn_update_sc", t["yellow"])
+        # White: compute
+        dpg.bind_item_theme("compute_btn", t["white"])
 
     def _on_tab_change(self, sender, app_data):
         """Track which tab is active for frame updates."""
@@ -147,11 +165,11 @@ class App:
                 width=100,
             )
             with dpg.group(horizontal=True):
-                dpg.add_button(label="Add SC", callback=self._add_sc_tab1, width=70)
-                dpg.add_button(label="Update SC", callback=self._update_sc_tab1, width=75)
+                dpg.add_button(label="Add SC", callback=self._add_sc_tab1, width=70, tag="btn_add_sc")
+                dpg.add_button(label="Update SC", callback=self._update_sc_tab1, width=75, tag="btn_update_sc")
             with dpg.group(horizontal=True):
-                dpg.add_button(label="Delete SC", callback=self._delete_sc_tab1, width=75)
-                dpg.add_button(label="Clear SCs", callback=self._clear_sc_tab1, width=70)
+                dpg.add_button(label="Delete SC", callback=self._delete_sc_tab1, width=75, tag="btn_delete_sc")
+                dpg.add_button(label="Clear SCs", callback=self._clear_sc_tab1, width=70, tag="btn_clear_sc")
             dpg.add_input_text(
                 tag="sc_list_display",
                 multiline=True,
@@ -282,10 +300,8 @@ class App:
                 default_value=35786.0,
                 width=140,
                 format="%.1f",
+                callback=self._on_maneuver_param_change,
             )
-            with dpg.group(horizontal=True):
-                dpg.add_button(label="Hohmann", callback=self._calc_hohmann, width=80)
-                dpg.add_button(label="Bi-elliptic", callback=self._calc_bielliptic, width=90)
             dpg.add_input_float(
                 label="Plane dI (deg)",
                 tag="plane_change_deg",
@@ -293,7 +309,18 @@ class App:
                 width=140,
                 step=0.5,
                 format="%.2f",
+                callback=self._on_maneuver_param_change,
             )
+            dpg.add_combo(
+                ["Periapsis", "Apoapsis", "Ascending Node", "Descending Node"],
+                default_value="Periapsis",
+                tag="maneuver_anchor",
+                width=140,
+                callback=self._on_maneuver_param_change,
+            )
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Hohmann", callback=self._calc_hohmann, width=80)
+                dpg.add_button(label="Bi-elliptic", callback=self._calc_bielliptic, width=90)
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Plane-Only", callback=self._template_plane_change, width=80)
                 dpg.add_button(
@@ -311,16 +338,6 @@ class App:
             dpg.add_spacer(height=8)
             dpg.add_text("BURN TIMELINE", color=(255, 200, 80))
             dpg.add_separator()
-            dpg.add_slider_float(
-                label="Burn @ % of sim",
-                tag="burn_time_pct",
-                min_value=0.0,
-                max_value=100.0,
-                default_value=25.0,
-                width=170,
-                format="%.1f",
-                callback=self._on_burn_param_change,
-            )
             dpg.add_input_float(
                 label="dv (km/s)",
                 tag="burn_dv",
@@ -332,8 +349,8 @@ class App:
                 callback=self._on_burn_param_change,
             )
             dpg.add_combo(
-                ["Percent", "Periapsis", "Apoapsis", "Ascending Node", "Descending Node"],
-                default_value="Percent",
+                ["At current time", "Periapsis", "Apoapsis", "Ascending Node", "Descending Node"],
+                default_value="At current time",
                 tag="burn_anchor",
                 width=170,
                 callback=self._on_burn_param_change,
@@ -346,9 +363,9 @@ class App:
                 callback=self._on_burn_param_change,
             )
             with dpg.group(horizontal=True):
-                dpg.add_button(label="Add Burn", callback=self._add_burn, width=80)
-                dpg.add_button(label="Clear", callback=self._clear_burns, width=70)
-                dpg.add_button(label="Clear Preview", callback=self._clear_preview_only, width=90)
+                dpg.add_button(label="Add Burn", callback=self._add_burn, width=80, tag="btn_add_burn")
+                dpg.add_button(label="Clear", callback=self._clear_burns, width=70, tag="btn_clear_burns")
+                dpg.add_button(label="Clear Preview", callback=self._clear_preview_only, width=90, tag="btn_clear_preview")
             dpg.add_input_int(
                 label="Remove # ",
                 tag="burn_remove_idx",
@@ -357,7 +374,7 @@ class App:
                 width=70,
                 min_clamped=True,
             )
-            dpg.add_button(label="Remove Burn", callback=self._remove_burn, width=110)
+            dpg.add_button(label="Remove Burn", callback=self._remove_burn, width=110, tag="btn_remove_burn")
             dpg.add_input_text(
                 tag="burn_plan_text",
                 multiline=True,
@@ -374,7 +391,40 @@ class App:
             no_scrollbar=True,
             no_scroll_with_mouse=True,
         ):
-            dpg.add_text("3D VIEWPORT", color=(0, 191, 255))
+            # Top toolbar: Active SC on left, view presets on right
+            with dpg.group(horizontal=True):
+                dpg.add_text("Active:", color=(200, 200, 200))
+                dpg.add_combo(
+                    [],
+                    default_value="",
+                    tag="active_sc_select",
+                    width=100,
+                    callback=self._on_active_sc_change,
+                )
+                dpg.add_spacer(width=20)
+                dpg.add_button(label="Fit", callback=self._fit_view, width=40)
+                dpg.add_spacer(width=12)
+                dpg.add_button(
+                    label="ISO", callback=lambda: self.viewport3d.set_view_isometric(), width=38
+                )
+                dpg.add_button(label="XY", callback=lambda: self.viewport3d.set_view_xy(), width=32)
+                dpg.add_button(label="XZ", callback=lambda: self.viewport3d.set_view_xz(), width=32)
+                dpg.add_button(label="YZ", callback=lambda: self.viewport3d.set_view_yz(), width=32)
+                dpg.add_spacer(width=8)
+                dpg.add_button(
+                    label="Orbit",
+                    callback=lambda: self.viewport3d.set_view_orbit_normal(),
+                    width=45,
+                )
+                dpg.add_button(
+                    label="Track",
+                    callback=lambda: self.viewport3d.set_view_along_velocity(),
+                    width=45,
+                )
+                dpg.add_button(
+                    label="Nadir", callback=lambda: self.viewport3d.set_view_nadir(), width=45
+                )
+
             dpg.add_separator()
 
             self.viewport3d = Viewport3D("viewport_drawlist", width=780, height=540)
@@ -382,42 +432,6 @@ class App:
             self.viewport3d.set_orbit_selected_callback(self._on_orbit_clicked)
 
             dpg.add_spacer(height=2)
-            with dpg.group(horizontal=True):
-                dpg.add_text("Active:", color=(200, 200, 200))
-                dpg.add_combo(
-                    [],
-                    default_value="",
-                    tag="active_sc_select",
-                    width=120,
-                    callback=self._on_active_sc_change,
-                )
-
-            dpg.add_spacer(height=4)
-            dpg.add_text("View Presets:", color=(150, 150, 150))
-            with dpg.group(horizontal=True, tag="view_presets_row_1"):
-                dpg.add_button(
-                    label="ISO", callback=lambda: self.viewport3d.set_view_isometric(), width=52
-                )
-                dpg.add_button(label="XY", callback=lambda: self.viewport3d.set_view_xy(), width=52)
-                dpg.add_button(label="XZ", callback=lambda: self.viewport3d.set_view_xz(), width=52)
-                dpg.add_button(label="YZ", callback=lambda: self.viewport3d.set_view_yz(), width=52)
-
-            with dpg.group(horizontal=True, tag="view_presets_row_2"):
-                dpg.add_button(
-                    label="Orbit Normal",
-                    callback=lambda: self.viewport3d.set_view_orbit_normal(),
-                    width=108,
-                )
-                dpg.add_button(
-                    label="Along-Track",
-                    callback=lambda: self.viewport3d.set_view_along_velocity(),
-                    width=108,
-                )
-                dpg.add_button(
-                    label="Nadir", callback=lambda: self.viewport3d.set_view_nadir(), width=70
-                )
-
-            dpg.add_spacer(height=4)
 
             with dpg.group(horizontal=True, tag="timeline_group"):
                 dpg.add_button(label="Play", tag="play_btn", callback=self._toggle_play, width=50)
@@ -428,7 +442,7 @@ class App:
                     default_value=0.0,
                     min_value=0.0,
                     max_value=1.0,
-                    width=350,
+                    width=-1,
                     callback=self._on_time_scrub,
                     format="%.3f",
                 )
@@ -519,7 +533,7 @@ class App:
             )
 
     def _build_bottom_panel(self):
-        with dpg.child_window(tag="bottom_panel", border=False):
+        with dpg.child_window(tag="bottom_panel", border=False, no_scrollbar=True):
             dpg.add_text("CONSOLE", color=(150, 150, 150))
             dpg.add_separator()
             dpg.add_input_text(
@@ -561,6 +575,10 @@ class App:
                 self._update_compare_metrics()
                 self._log(f"Compare baseline ready: {compare_result.n_points} points")
 
+        # Sync compare/reference visibility with checkbox
+        if self.viewport3d:
+            self.viewport3d.set_show_reference(bool(dpg.get_value("compare_mode")))
+
         if self.engine.is_complete and self.trajectory is None:
             result = self.engine.result
             if result is not None:
@@ -599,18 +617,21 @@ class App:
                     )
                 self._log(f"Done: {result.n_points} points, duration={result.duration:.1f}s")
                 dpg.configure_item("time_slider", max_value=result.duration)
-                # Now compute closest approach (primary result is ready)
-                if self._tab1_multi_result is not None:
-                    self._compute_closest_approach_deferred()
-                # Update multi-trajectory for active SC with burn result
+                # Store trajectory for active SC and refresh all multi-trajectories
                 active_name = dpg.get_value("active_sc_select")
-                if active_name and self.viewport3d:
-                    self._update_multi_traj_for_active(active_name, result)
-                    # Store trajectory in SC data
+                if active_name:
                     for sc in self._tab1_spacecraft:
                         if sc["name"] == active_name:
                             sc["trajectory"] = result
                             break
+                # Rebuild all multi-trajectories with latest data
+                self._refresh_all_multi_trajectories()
+                # Ensure viewport selection matches active SC
+                if active_name and self.viewport3d:
+                    self.viewport3d._selected_orbit = active_name
+                # Now compute closest approach (after storing burn trajectory)
+                if self._tab1_multi_result is not None:
+                    self._compute_closest_approach_deferred()
             elif self.engine.error:
                 self._log(f"ERROR: {self.engine.error}")
 
@@ -663,6 +684,14 @@ class App:
             {"name": name, "color": color, "coe": coe, "maneuvers": [], "trajectory": None}
         )
         self._refresh_tab1_sc_list()
+        # Auto-select the newly added SC
+        dpg.set_value("active_sc_select", name)
+        self._active_sc_name = name
+        # Clear preview when adding a new SC
+        self._preview_enabled = False
+        self.viewport3d.clear_preview_trajectory()
+        self.viewport3d.clear_transfers()
+        self.viewport3d.set_burn_cursor(None)
         # Auto-cycle name and color
         color_cycle = ["Cyan", "Green", "Red", "Yellow", "Orange", "Purple", "White"]
         next_idx = len(self._tab1_spacecraft) % len(color_cycle)
@@ -732,7 +761,11 @@ class App:
             lines.append(f"{i}. {sc['name']} a={coe.a:.0f}")
             names.append(sc["name"])
         dpg.set_value("sc_list_display", "\n".join(lines))
-        dpg.configure_item("active_sc_select", items=names, default_value=names[0] if names else "")
+        # Preserve current selection if still valid
+        current = dpg.get_value("active_sc_select")
+        if current not in names:
+            current = names[0] if names else ""
+        dpg.configure_item("active_sc_select", items=names, default_value=current)
 
     def _on_active_sc_change(self, sender=None, app_data=None, user_data=None):
         """When user selects a different SC, load its COE into the sliders."""
@@ -800,6 +833,8 @@ class App:
                 if self.viewport3d:
                     self.viewport3d._selected_orbit = name
                     self.viewport3d._needs_redraw = True
+                # Refresh multi-trajectories so all SC show their latest (burned) paths
+                self._refresh_all_multi_trajectories()
                 break
 
     def _get_central_body(self) -> CelestialBody:
@@ -846,6 +881,14 @@ class App:
 
         coe = OrbitalElements(a=a, e=e, i=i, raan=raan, omega=omega, theta=theta)
 
+        # Ensure active SC's stored COE matches sliders (user may have tweaked without Update)
+        active_name = dpg.get_value("active_sc_select")
+        if active_name:
+            for sc in self._tab1_spacecraft:
+                if sc["name"] == active_name:
+                    sc["coe"] = coe
+                    break
+
         pert = PerturbationConfig(
             j2_enabled=dpg.get_value("pert_j2"),
             drag_enabled=dpg.get_value("pert_drag"),
@@ -884,6 +927,7 @@ class App:
         self.viewport3d.clear_reference_trajectory()
         self.viewport3d.clear_burn_markers()
         self.viewport3d.clear_multi_trajectories()
+        self.viewport3d.set_burn_cursor(None)
         self._tab1_multi_result = None
         self._update_burn_events_display([])
         dpg.set_value("compare_text", "Compare mode idle.")
@@ -960,6 +1004,10 @@ class App:
             traj = result.get_trajectory(sc_name)
             trajs.append((traj, sc_color, sc_name))
         self.viewport3d.set_multi_trajectories(trajs)
+        # Set active SC as selected in viewport
+        active_name = dpg.get_value("active_sc_select")
+        if active_name:
+            self.viewport3d._selected_orbit = active_name
 
         # Compute closest approach between primary and each additional SC
         self._compute_closest_approach(primary_scenario)
@@ -970,7 +1018,7 @@ class App:
         if not self.viewport3d:
             return
         new_multi = []
-        for orbit_pts, c, name in self.viewport3d._multi_trajectories:
+        for orbit_pts, c, name, _t in self.viewport3d._multi_trajectories:
             # Check if this SC has a stored trajectory (with burns)
             sc_traj = None
             sc_color = None
@@ -983,10 +1031,40 @@ class App:
                     sc_color = sc["color"]
                     break
             if sc_traj is not None:
-                pts, _ = sc_traj.downsample(3000)
-                new_multi.append((pts, (*sc_color, 220), name))
+                n = 3000
+                if sc_traj.n_points <= n:
+                    pts, t_arr = sc_traj.r, sc_traj.t
+                else:
+                    idx = np.linspace(0, sc_traj.n_points - 1, n, dtype=int)
+                    pts, t_arr = sc_traj.r[idx], sc_traj.t[idx]
+                new_multi.append((pts, (*sc_color, 220), name, t_arr))
             else:
-                new_multi.append((orbit_pts, c, name))
+                new_multi.append((orbit_pts, c, name, _t))
+        self.viewport3d._multi_trajectories = new_multi
+        self.viewport3d._needs_redraw = True
+
+    def _refresh_all_multi_trajectories(self):
+        """Rebuild multi-trajectories from stored burn trajectories for all SC."""
+        if not self.viewport3d or not self._tab1_spacecraft:
+            return
+        if not self.viewport3d._multi_trajectories and self._tab1_multi_result is None:
+            return
+        new_multi = []
+        for sc in self._tab1_spacecraft:
+            name = sc["name"]
+            color = sc["color"]
+            # Prefer stored trajectory (with burns), else multi_result, else skip
+            traj = sc.get("trajectory")
+            if traj is None and self._tab1_multi_result is not None:
+                traj = self._tab1_multi_result.get_trajectory(name)
+            if traj is not None:
+                n = 3000
+                if traj.n_points <= n:
+                    pts, t_arr = traj.r, traj.t
+                else:
+                    idx = np.linspace(0, traj.n_points - 1, n, dtype=int)
+                    pts, t_arr = traj.r[idx], traj.t[idx]
+                new_multi.append((pts, (*color, 220), name, t_arr))
         self.viewport3d._multi_trajectories = new_multi
         self.viewport3d._needs_redraw = True
 
@@ -1000,12 +1078,22 @@ class App:
             return
 
         names = self._tab1_multi_result.spacecraft_names
+
+        def _get_best_traj(sc_name):
+            """Get the best available trajectory for a SC (burned > original)."""
+            for sc in self._tab1_spacecraft:
+                if sc["name"] == sc_name and sc.get("trajectory") is not None:
+                    return sc["trajectory"]
+            return self._tab1_multi_result.get_trajectory(sc_name)
+
         if len(names) < 2:
             # Compare primary trajectory vs single additional SC
             if self.trajectory is None or len(names) < 1:
                 return
             primary_result = self.trajectory
-            other_traj = self._tab1_multi_result.get_trajectory(names[0])
+            other_traj = _get_best_traj(names[0])
+            if other_traj is None:
+                return
             t_max = min(primary_result.t[-1], other_traj.t[-1])
             t_samples = np.linspace(0, t_max, 2000)
             min_dist, min_t, min_r1, min_r2 = np.inf, 0.0, None, None
@@ -1030,8 +1118,10 @@ class App:
         best_pb = None
         for i in range(len(names)):
             for j in range(i + 1, len(names)):
-                traj_a = self._tab1_multi_result.get_trajectory(names[i])
-                traj_b = self._tab1_multi_result.get_trajectory(names[j])
+                traj_a = _get_best_traj(names[i])
+                traj_b = _get_best_traj(names[j])
+                if traj_a is None or traj_b is None:
+                    continue
                 t_max = min(traj_a.t[-1], traj_b.t[-1])
                 t_samples = np.linspace(0, t_max, 2000)
                 min_dist, min_t, min_r1, min_r2 = np.inf, 0.0, None, None
@@ -1057,8 +1147,12 @@ class App:
 
         dpg.configure_item("main_window", pos=(0, 0), width=vw, height=vh)
 
-        bottom_h = min(max(110, int(vh * 0.21)), 250)
-        top_h = max(220, vh - bottom_h - 8)
+        # Account for tab bar height (~30px)
+        tab_bar_h = 30
+        available_h = vh - tab_bar_h
+
+        bottom_h = min(max(110, int(available_h * 0.18)), 200)
+        top_h = max(220, available_h - bottom_h - 8)
 
         left_w = min(self._left_panel_width, max(220, int(vw * 0.25)))
         right_w = min(self._right_panel_width, max(240, int(vw * 0.28)))
@@ -1083,11 +1177,11 @@ class App:
         dpg.configure_item("console_text", height=console_h)
 
         viewport_w = max(320, center_w - 16)
-        viewport_h = max(260, top_h - 170)
+        viewport_h = max(260, top_h - 130)
         if self.viewport3d is not None:
             self.viewport3d.resize(viewport_w, viewport_h)
 
-        slider_w = max(180, viewport_w - 320)
+        slider_w = max(180, viewport_w - 220)
         dpg.configure_item("time_slider", width=slider_w)
 
     def _toggle_play(self):
@@ -1114,6 +1208,9 @@ class App:
         self._update_telemetry()
         self._update_time_display()
         self._update_plot_cursor()
+        # Update burn cursor if anchor is "At current time"
+        if dpg.does_item_exist("burn_anchor") and str(dpg.get_value("burn_anchor")) == "At current time":
+            self._update_burn_cursor()
 
     def _on_speed_change(self, sender, app_data):
         speed_map = {
@@ -1271,7 +1368,52 @@ class App:
         dpg.add_inf_line_series([t_cursor], parent="alt_y", tag="alt_cursor")
         dpg.add_inf_line_series([t_cursor], parent="vel_y", tag="vel_cursor")
 
+    def _on_maneuver_param_change(self, sender=None, app_data=None, user_data=None):
+        """Live-update maneuver preview when target_alt, plane_change_deg, or anchor changes."""
+        if self._last_maneuver_template is None:
+            return
+        # Re-run the last template to update preview dynamically
+        template_map = {
+            "hohmann": self._calc_hohmann,
+            "bielliptic": self._calc_bielliptic,
+            "plane_change": self._template_plane_change,
+            "transfer_plane": self._template_transfer_plane,
+            "circularize": self._template_circularize,
+            "deorbit": self._template_deorbit,
+            "phasing": self._template_phasing,
+            "rendezvous": self._template_rendezvous,
+        }
+        fn = template_map.get(self._last_maneuver_template)
+        if fn:
+            fn()
+
+    def _get_maneuver_start_time(self) -> float:
+        """Get the fractional start time based on the maneuver_anchor dropdown."""
+        anchor = str(dpg.get_value("maneuver_anchor"))
+        if anchor == "Periapsis":
+            return 0.0
+        elif anchor == "Apoapsis":
+            return 0.5
+        elif anchor == "Ascending Node":
+            omega = float(dpg.get_value("coe_omega"))
+            theta0 = float(dpg.get_value("coe_theta"))
+            target = (-omega) % 360.0
+            frac = ((target - theta0) % 360.0) / 360.0
+            if frac < 1e-6:
+                frac = 1e-4
+            return frac
+        elif anchor == "Descending Node":
+            omega = float(dpg.get_value("coe_omega"))
+            theta0 = float(dpg.get_value("coe_theta"))
+            target = (180.0 - omega) % 360.0
+            frac = ((target - theta0) % 360.0) / 360.0
+            if frac < 1e-6:
+                frac = 1e-4
+            return frac
+        return 0.0
+
     def _calc_hohmann(self):
+        self._last_maneuver_template = "hohmann"
         a = dpg.get_value("coe_a")
         e = dpg.get_value("coe_e")
         r1 = a * (1 - e) if e > 0.01 else a
@@ -1284,9 +1426,10 @@ class App:
             self.viewport3d.clear_transfers()
             self.viewport3d.add_transfer_trajectory(transfer, color=(255, 220, 30, 240))
         burn_dir = "prograde" if r2 >= r1 else "retrograde"
+        t_start = self._get_maneuver_start_time()
         self._set_maneuver_plan(
             [
-                ManeuverEvent(time=0.0, dv_magnitude=result["dv1"], direction=burn_dir),
+                ManeuverEvent(time=t_start, dv_magnitude=result["dv1"], direction=burn_dir),
                 ManeuverEvent(
                     time=result["dt_transfer"], dv_magnitude=result["dv2"], direction=burn_dir
                 ),
@@ -1301,6 +1444,7 @@ class App:
         self._log(f"Hohmann: dv_total={result['dv_total']:.4f} km/s (burn plan loaded)")
 
     def _calc_bielliptic(self):
+        self._last_maneuver_template = "bielliptic"
         a = dpg.get_value("coe_a")
         e = dpg.get_value("coe_e")
         r1 = a * (1 - e) if e > 0.01 else a
@@ -1320,9 +1464,10 @@ class App:
             self.viewport3d.add_transfer_trajectory(transfer_1, color=(255, 210, 40, 230))
         if transfer_2 is not None:
             self.viewport3d.add_transfer_trajectory(transfer_2, color=(255, 140, 40, 230))
+        t_start = self._get_maneuver_start_time()
         self._set_maneuver_plan(
             [
-                ManeuverEvent(time=0.0, dv_magnitude=result["dv1"], direction="prograde"),
+                ManeuverEvent(time=t_start, dv_magnitude=result["dv1"], direction="prograde"),
                 ManeuverEvent(time=dt1, dv_magnitude=result["dv2"], direction="prograde"),
                 ManeuverEvent(time=dt1 + dt2, dv_magnitude=result["dv3"], direction="retrograde"),
             ]
@@ -1336,6 +1481,7 @@ class App:
         self._log(f"Bi-elliptic: dv_total={result['dv_total']:.4f} km/s (burn plan loaded)")
 
     def _template_plane_change(self):
+        self._last_maneuver_template = "plane_change"
         a = dpg.get_value("coe_a")
         e = dpg.get_value("coe_e")
         delta_i = abs(float(dpg.get_value("plane_change_deg")))
@@ -1343,7 +1489,8 @@ class App:
         v_orb = np.sqrt(MU_EARTH / max(1.0, r))
         dv = plane_change_dv(v_orb, delta_i)
         self._post_burn_period_hint = orbital_period(a, MU_EARTH)
-        self._set_maneuver_plan([ManeuverEvent(time=0.5, dv_magnitude=dv, direction="normal")])
+        t_start = self._get_maneuver_start_time()
+        self._set_maneuver_plan([ManeuverEvent(time=t_start, dv_magnitude=dv, direction="normal")])
         dpg.set_value(
             "maneuver_info",
             f"Plane change template\ndI={delta_i:.2f} deg\ndv={dv:.4f} km/s",
@@ -1351,6 +1498,7 @@ class App:
         self._log(f"Plane-change template loaded: dI={delta_i:.2f} dv={dv:.4f} km/s")
 
     def _template_transfer_plane(self):
+        self._last_maneuver_template = "transfer_plane"
         a = dpg.get_value("coe_a")
         e = dpg.get_value("coe_e")
         r1 = a * (1 - e) if e > 0.01 else a
@@ -1366,9 +1514,10 @@ class App:
         dv2_combined = combined_dv(v_transfer_at_r2, v_circ_r2, delta_i)
         burn_dir = "prograde" if r2 >= r1 else "retrograde"
 
+        t_start = self._get_maneuver_start_time()
         self._set_maneuver_plan(
             [
-                ManeuverEvent(time=0.0, dv_magnitude=result["dv1"], direction=burn_dir),
+                ManeuverEvent(time=t_start, dv_magnitude=result["dv1"], direction=burn_dir),
                 ManeuverEvent(
                     time=result["dt_transfer"], dv_magnitude=dv2_combined, direction=burn_dir
                 ),
@@ -1502,10 +1651,9 @@ class App:
             if self._maneuver_plan:
                 self._request_maneuver_preview()
             return
-        t_pct = float(dpg.get_value("burn_time_pct"))
         direction = str(dpg.get_value("burn_dir"))
         anchor = str(dpg.get_value("burn_anchor"))
-        t_frac = t_pct / 100.0 if anchor == "Percent" else self._burn_time_from_anchor(anchor)
+        t_frac = self._get_burn_time_frac(anchor)
 
         # Temporarily add this burn to the plan for preview
         temp_event = ManeuverEvent(time=t_frac, dv_magnitude=dv, direction=direction)
@@ -1564,7 +1712,6 @@ class App:
         self._request_maneuver_preview()
 
     def _add_burn(self):
-        t_pct = float(dpg.get_value("burn_time_pct"))
         dv = float(dpg.get_value("burn_dv"))
         direction = str(dpg.get_value("burn_dir"))
         anchor = str(dpg.get_value("burn_anchor"))
@@ -1572,7 +1719,7 @@ class App:
             self._log("Burn ignored: dv must be > 0.")
             return
 
-        t_frac = t_pct / 100.0 if anchor == "Percent" else self._burn_time_from_anchor(anchor)
+        t_frac = self._get_burn_time_frac(anchor)
 
         self._maneuver_plan.append(
             ManeuverEvent(
@@ -1583,8 +1730,11 @@ class App:
         )
         self._maneuver_plan.sort(key=lambda e: e.time)
         self._refresh_burn_plan_display()
-        self._request_maneuver_preview()
-        self._update_burn_cursor()
+        # Clear preview after committing a burn
+        self._preview_enabled = False
+        self.viewport3d.clear_preview_trajectory()
+        self.viewport3d.clear_transfers()
+        self.viewport3d.set_burn_cursor(None)
         # Save burns to active SC
         active_name = dpg.get_value("active_sc_select")
         for sc in self._tab1_spacecraft:
@@ -1601,13 +1751,9 @@ class App:
             return
         try:
             anchor = str(dpg.get_value("burn_anchor"))
-            t_pct = float(dpg.get_value("burn_time_pct"))
             direction = str(dpg.get_value("burn_dir"))
 
-            if anchor == "Percent":
-                t_frac = t_pct / 100.0
-            else:
-                t_frac = self._burn_time_from_anchor(anchor)
+            t_frac = self._get_burn_time_frac(anchor)
 
             # Get position on orbit at t_frac, accounting for prior burns
             a = float(dpg.get_value("coe_a"))
@@ -1741,6 +1887,10 @@ class App:
         self.viewport3d.set_burn_cursor(None)
         self._log("Cleared preview overlays.")
 
+    def _fit_view(self):
+        if self.viewport3d:
+            self.viewport3d.fit_to_content()
+
     def _remove_burn(self):
         idx = int(dpg.get_value("burn_remove_idx")) - 1
         if 0 <= idx < len(self._maneuver_plan):
@@ -1764,6 +1914,16 @@ class App:
                 when = f"{burn.time:7.1f}s"
             lines.append(f"{idx:02d}. t={when}  dv={burn.dv_magnitude:.4f}  {burn.direction}")
         dpg.set_value("burn_plan_text", "\n".join(lines))
+
+    def _get_burn_time_frac(self, anchor: str) -> float:
+        """Get burn time as fraction of initial orbit period based on anchor mode."""
+        if anchor == "At current time":
+            a = float(dpg.get_value("coe_a"))
+            period = orbital_period(a, MU_EARTH)
+            if period > 0:
+                return self.current_time / period
+            return 0.0
+        return self._burn_time_from_anchor(anchor)
 
     def _burn_time_from_anchor(self, anchor: str) -> float:
         """Compute the fractional time (0-1 of one initial orbit) for an anchored burn.
@@ -2080,6 +2240,7 @@ class App:
 
     def _template_circularize(self):
         """Add a prograde burn at apoapsis to circularize the orbit."""
+        self._last_maneuver_template = "circularize"
         e = float(dpg.get_value("coe_e"))
         a = float(dpg.get_value("coe_a"))
         if e < 0.001:
@@ -2092,8 +2253,9 @@ class App:
         # Velocity for circular orbit at ra
         v_circ = np.sqrt(body.mu / ra)
         dv = v_circ - v_apo
+        t_start = self._get_maneuver_start_time()
         self._set_maneuver_plan(
-            [ManeuverEvent(time=0.5, dv_magnitude=abs(dv), direction="prograde")]
+            [ManeuverEvent(time=t_start, dv_magnitude=abs(dv), direction="prograde")]
         )
         dpg.set_value(
             "maneuver_info",
@@ -2103,6 +2265,7 @@ class App:
 
     def _template_deorbit(self):
         """Add a retrograde burn to lower periapsis to ~80 km (re-entry)."""
+        self._last_maneuver_template = "deorbit"
         a = float(dpg.get_value("coe_a"))
         e = float(dpg.get_value("coe_e"))
         body = self._get_central_body()
@@ -2114,7 +2277,8 @@ class App:
         # Required velocity at apoapsis for new orbit
         v_new = np.sqrt(body.mu * (2.0 / ra - 1.0 / a_new))
         dv = v_apo - v_new
-        self._set_maneuver_plan([ManeuverEvent(time=0.5, dv_magnitude=dv, direction="retrograde")])
+        t_start = self._get_maneuver_start_time()
+        self._set_maneuver_plan([ManeuverEvent(time=t_start, dv_magnitude=dv, direction="retrograde")])
         dpg.set_value(
             "maneuver_info",
             f"De-orbit burn: Δv = {dv:.4f} km/s\nNew periapsis: {rp_target - body.radius:.0f} km (re-entry)",
@@ -2123,6 +2287,7 @@ class App:
 
     def _template_phasing(self):
         """Phasing maneuver: adjust period to drift ahead/behind by 30°."""
+        self._last_maneuver_template = "phasing"
         a = float(dpg.get_value("coe_a"))
         body = self._get_central_body()
         T = orbital_period(a, body.mu)
@@ -2134,9 +2299,10 @@ class App:
         v1 = np.sqrt(body.mu / a)
         v_transfer = np.sqrt(body.mu * (2.0 / a - 1.0 / a_new))
         dv = abs(v_transfer - v1)
+        t_start = self._get_maneuver_start_time()
         self._set_maneuver_plan(
             [
-                ManeuverEvent(time=0.0, dv_magnitude=dv, direction="retrograde"),
+                ManeuverEvent(time=t_start, dv_magnitude=dv, direction="retrograde"),
                 ManeuverEvent(time=0.5, dv_magnitude=dv, direction="prograde"),
             ]
         )
@@ -2145,6 +2311,7 @@ class App:
 
     def _template_rendezvous(self):
         """Co-planar rendezvous: phasing + Hohmann to target altitude."""
+        self._last_maneuver_template = "rendezvous"
         a = float(dpg.get_value("coe_a"))
         target_alt = float(dpg.get_value("target_alt"))
         body = self._get_central_body()
@@ -2152,10 +2319,11 @@ class App:
         result = hohmann_dv(a, r_target)
         dv1 = result["dv1"]
         dv2 = result["dv2"]
+        t_start = self._get_maneuver_start_time()
         # Add a phasing component
         self._set_maneuver_plan(
             [
-                ManeuverEvent(time=0.25, dv_magnitude=dv1, direction="prograde"),
+                ManeuverEvent(time=t_start, dv_magnitude=dv1, direction="prograde"),
                 ManeuverEvent(time=0.75, dv_magnitude=dv2, direction="prograde"),
             ]
         )
