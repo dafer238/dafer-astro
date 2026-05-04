@@ -1268,8 +1268,8 @@ class App:
         for tag in ("alt_cursor", "vel_cursor"):
             if dpg.does_item_exist(tag):
                 dpg.delete_item(tag)
-        dpg.add_vline_series([t_cursor], parent="alt_y", tag="alt_cursor")
-        dpg.add_vline_series([t_cursor], parent="vel_y", tag="vel_cursor")
+        dpg.add_inf_line_series([t_cursor], parent="alt_y", tag="alt_cursor")
+        dpg.add_inf_line_series([t_cursor], parent="vel_y", tag="vel_cursor")
 
     def _calc_hohmann(self):
         a = dpg.get_value("coe_a")
