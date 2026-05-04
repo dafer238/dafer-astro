@@ -473,6 +473,8 @@ class App:
 
             dpg.add_spacer(height=2)
 
+            dpg.add_text("t = 0.0 s  |  0.0 / 0.0 s", tag="time_display", color=(150, 150, 150))
+
             with dpg.group(horizontal=True, tag="timeline_group"):
                 dpg.add_button(label="Play", tag="play_btn", callback=self._toggle_play, width=50)
                 dpg.add_button(label="Reset", callback=self._reset_time, width=50)
@@ -505,7 +507,7 @@ class App:
                     width=70,
                 )
 
-            dpg.add_text("t = 0.0 s  |  0.0 / 0.0 s", tag="time_display", color=(150, 150, 150))
+            dpg.add_spacer(height=4)
 
     def _build_right_panel(self):
         with dpg.child_window(width=260, tag="right_panel"):
