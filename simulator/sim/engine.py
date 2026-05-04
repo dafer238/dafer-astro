@@ -71,6 +71,15 @@ class SimulationEngine:
         if cfg.drag_enabled:
             builder.add_drag(cfg.drag_cd, cfg.drag_ballistic_coeff)
 
+        # Third-body perturbations using real ephemeris
+        from simulator.core.ephemeris import datetime_to_jd
+
+        epoch_jd = datetime_to_jd(scenario.epoch)
+        if cfg.third_body_moon:
+            builder.add_third_body_ephemeris("Moon", "Earth", epoch_jd)
+        if cfg.third_body_sun:
+            builder.add_third_body_ephemeris("Sun", "Earth", epoch_jd)
+
         eom = builder.build()
 
         traj = self._propagate_with_maneuvers(

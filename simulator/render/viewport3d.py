@@ -191,16 +191,90 @@ class Viewport3D:
         self._burn_cursor_pos: np.ndarray | None = None
         self._burn_cursor_dir: np.ndarray | None = None
         self._body_radius = R_EARTH
+        self._body_name = "Earth"
+        self._body_color = (28, 88, 170)
         self._current_time = 0.0
         self._dragging = False
         self._last_mouse = (0.0, 0.0)
         self._needs_redraw = True
+        self._multi_trajectories: list[tuple[np.ndarray, tuple[int, int, int, int], str]] = []
+        self._extra_bodies: list[tuple[np.ndarray, float, tuple[int, int, int], str]] = []
+        self._closest_approach_line: tuple[np.ndarray, np.ndarray] | None = None
+        self._preview_orbit: np.ndarray | None = None
+        self._preview_orbit_color: tuple[int, int, int] = (100, 255, 100)
+        self._orbit_paths: list[tuple[np.ndarray, tuple[int, int, int], str]] = []
 
-    def set_trajectory(self, traj: TrajectoryData, body_radius: float = R_EARTH):
+    def set_extra_bodies(self, bodies: list[tuple[np.ndarray, float, tuple[int, int, int], str]]):
+        """Set additional celestial bodies to render.
+        Each entry: (position_km, radius_km, (r,g,b), name)"""
+        self._extra_bodies = bodies
+        self._needs_redraw = True
+
+    def clear_extra_bodies(self):
+        self._extra_bodies = []
+        self._needs_redraw = True
+
+    def set_closest_approach_line(self, point_a: np.ndarray | None, point_b: np.ndarray | None):
+        """Draw a line between two points showing closest approach."""
+        if point_a is not None and point_b is not None:
+            self._closest_approach_line = (point_a, point_b)
+        else:
+            self._closest_approach_line = None
+        self._needs_redraw = True
+
+    def clear_closest_approach_line(self):
+        self._closest_approach_line = None
+        self._needs_redraw = True
+
+    def set_trajectory(
+        self,
+        traj: TrajectoryData,
+        body_radius: float = R_EARTH,
+        body_name: str = "Earth",
+        body_color: tuple[int, int, int] = (28, 88, 170),
+    ):
         self._trajectory = traj
         self._body_radius = body_radius
+        self._body_name = body_name
+        self._body_color = body_color
         self._orbit_points, _ = traj.downsample(3000)
         self._current_time = traj.t[0]
+        self._needs_redraw = True
+
+    def set_multi_trajectories(
+        self, trajectories: list[tuple[TrajectoryData, tuple[int, int, int], str]]
+    ):
+        """Set multiple named/colored trajectories for rendering.
+        Each entry: (TrajectoryData, (r,g,b) color, name)"""
+        self._multi_trajectories = []
+        for traj, color, name in trajectories:
+            pts, _ = traj.downsample(2500)
+            self._multi_trajectories.append((pts, (*color, 220), name))
+        self._needs_redraw = True
+
+    def clear_multi_trajectories(self):
+        self._multi_trajectories = []
+        self._needs_redraw = True
+
+    def set_preview_orbit(
+        self, points: np.ndarray | None, color: tuple[int, int, int] = (100, 255, 100)
+    ):
+        """Set a lightweight preview orbit (Nx3 array of positions)."""
+        self._preview_orbit = points
+        self._preview_orbit_color = color
+        self._needs_redraw = True
+
+    def clear_preview_orbit(self):
+        self._preview_orbit = None
+        self._needs_redraw = True
+
+    def set_orbit_paths(self, paths: list[tuple[np.ndarray, tuple[int, int, int], str]]):
+        """Set background orbit paths (e.g., planet orbits). Each: (Nx3 points, color, name)"""
+        self._orbit_paths = paths
+        self._needs_redraw = True
+
+    def clear_orbit_paths(self):
+        self._orbit_paths = []
         self._needs_redraw = True
 
     def add_transfer_trajectory(
@@ -264,7 +338,8 @@ class Viewport3D:
 
     def create(self, parent):
         dpg.add_drawlist(width=self.width, height=self.height, tag=self.tag, parent=parent)
-        with dpg.handler_registry(tag="viewport_handlers"):
+        handler_tag = f"{self.tag}_handlers"
+        with dpg.handler_registry(tag=handler_tag):
             dpg.add_mouse_click_handler(button=0, callback=self._on_click)
             dpg.add_mouse_release_handler(button=0, callback=self._on_release)
             dpg.add_mouse_drag_handler(button=0, callback=self._on_drag)
@@ -367,13 +442,18 @@ class Viewport3D:
 
         self._draw_earth(view, proj)
         self._draw_continents(view, proj)
+        self._draw_extra_bodies(view, proj)
         self._draw_reference(view, proj)
+        self._draw_orbit_paths(view, proj)
         self._draw_orbit(view, proj)
+        self._draw_multi_trajectories(view, proj)
+        self._draw_preview_orbit(view, proj)
         self._draw_orbit_annotations(view, proj)
         self._draw_preview(view, proj)
         self._draw_transfers(view, proj)
         self._draw_burn_markers(view, proj)
         self._draw_burn_cursor(view, proj)
+        self._draw_closest_approach(view, proj)
         self._draw_satellite(view, proj)
         self._draw_axes(view, proj)
 
@@ -403,14 +483,19 @@ class Viewport3D:
 
         radius_px = max(10, radius_px)
 
+        bc = self._body_color
         dpg.draw_circle(
             (cx, cy),
             radius_px,
             parent=self.tag,
-            color=(28, 88, 170, 255),
-            fill=(15, 68, 150, 255),
+            color=(*bc, 255),
+            fill=(bc[0] // 2, bc[1] // 2, bc[2] // 2, 255),
             thickness=2.0,
         )
+
+        # Lat/lon line overlays only for Earth
+        if self._body_name != "Earth":
+            return
 
         # Lat/lon line overlays (no additional filled spheres).
         for i in range(1, 8):
@@ -444,6 +529,8 @@ class Viewport3D:
                 dpg.draw_polyline(pts, parent=self.tag, color=(20, 60, 115, 50), thickness=0.45)
 
     def _draw_continents(self, view, proj):
+        if self._body_name != "Earth":
+            return
         scale = self._body_radius / self.camera.distance
         if max(10, scale * min(self.width, self.height) * 0.8) < 15:
             return
@@ -471,6 +558,46 @@ class Viewport3D:
                 dpg.draw_polyline(
                     visible_pts, parent=self.tag, color=(96, 193, 120, 230), thickness=1.0
                 )
+
+    def _draw_extra_bodies(self, view, proj):
+        """Draw additional celestial bodies (Moon, planets, etc.)."""
+        for pos, radius, color, name in self._extra_bodies:
+            sp = project_points(pos.reshape(1, 3), view, proj, self.width, self.height)
+            if sp[0, 0] <= -5000:
+                continue
+            cx, cy = float(sp[0, 0]), float(sp[0, 1])
+
+            # Compute visual radius
+            eye = self.camera.eye_position
+            eye_hat = eye / np.linalg.norm(eye)
+            up = np.array([0.0, 0.0, 1.0])
+            perp = np.cross(eye_hat, up)
+            if np.linalg.norm(perp) < 1e-6:
+                perp = np.cross(eye_hat, np.array([1.0, 0.0, 0.0]))
+            perp = perp / np.linalg.norm(perp)
+            limb_point = pos + perp * radius
+            limb_sp = project_points(limb_point.reshape(1, 3), view, proj, self.width, self.height)
+            if limb_sp[0, 0] > -5000:
+                radius_px = max(3, np.sqrt((limb_sp[0, 0] - cx) ** 2 + (limb_sp[0, 1] - cy) ** 2))
+            else:
+                radius_px = max(
+                    3, radius / self.camera.distance * min(self.width, self.height) * 0.5
+                )
+
+            fill_color = (*color, 180)
+            border_color = (*color, 255)
+            dpg.draw_circle(
+                (cx, cy),
+                radius_px,
+                parent=self.tag,
+                color=border_color,
+                fill=fill_color,
+                thickness=1.5,
+            )
+            # Label
+            dpg.draw_text(
+                (cx + radius_px + 3, cy - 5), name, parent=self.tag, color=(*color, 200), size=9
+            )
 
     def _draw_reference(self, view, proj):
         if self._reference_points is None:
@@ -505,6 +632,69 @@ class Viewport3D:
                 pts = []
         if len(pts) > 1:
             dpg.draw_polyline(pts, parent=self.tag, color=(0, 191, 255, 220), thickness=1.5)
+
+    def _draw_multi_trajectories(self, view, proj):
+        """Draw multiple named/colored spacecraft trajectories."""
+        for orbit_pts, color, name in self._multi_trajectories:
+            screen = project_points(orbit_pts, view, proj, self.width, self.height)
+            valid = screen[:, 0] > -5000
+            pts = []
+            for i in range(len(screen)):
+                if valid[i]:
+                    pts.append((float(screen[i, 0]), float(screen[i, 1])))
+                else:
+                    if len(pts) > 1:
+                        dpg.draw_polyline(pts, parent=self.tag, color=color, thickness=1.5)
+                    pts = []
+            if len(pts) > 1:
+                dpg.draw_polyline(pts, parent=self.tag, color=color, thickness=1.5)
+            # Draw label at last valid point
+            if len(pts) > 0:
+                lx, ly = pts[-1]
+                dpg.draw_text(
+                    (lx + 5, ly - 4),
+                    name,
+                    parent=self.tag,
+                    color=color[:3] + (200,),
+                    size=10,
+                )
+
+    def _draw_orbit_paths(self, view, proj):
+        """Draw background orbit paths (planet orbits etc.)."""
+        for pts, color, name in self._orbit_paths:
+            if len(pts) < 2:
+                continue
+            screen = project_points(pts, view, proj, self.width, self.height)
+            valid = screen[:, 0] > -5000
+            c = (*color, 80)
+            segments = []
+            for i in range(len(screen)):
+                if valid[i]:
+                    segments.append((float(screen[i, 0]), float(screen[i, 1])))
+                else:
+                    if len(segments) > 1:
+                        dpg.draw_polyline(segments, parent=self.tag, color=c, thickness=0.8)
+                    segments = []
+            if len(segments) > 1:
+                dpg.draw_polyline(segments, parent=self.tag, color=c, thickness=0.8)
+
+    def _draw_preview_orbit(self, view, proj):
+        """Draw lightweight preview orbit from COE (no propagation)."""
+        if self._preview_orbit is None or len(self._preview_orbit) < 2:
+            return
+        screen = project_points(self._preview_orbit, view, proj, self.width, self.height)
+        valid = screen[:, 0] > -5000
+        c = (*self._preview_orbit_color, 150)
+        pts = []
+        for i in range(len(screen)):
+            if valid[i]:
+                pts.append((float(screen[i, 0]), float(screen[i, 1])))
+            else:
+                if len(pts) > 1:
+                    dpg.draw_polyline(pts, parent=self.tag, color=c, thickness=1.0)
+                pts = []
+        if len(pts) > 1:
+            dpg.draw_polyline(pts, parent=self.tag, color=c, thickness=1.0)
 
     def _draw_orbit_annotations(self, view, proj):
         if self._orbit_points is None or len(self._orbit_points) < 8:
@@ -744,6 +934,32 @@ class Viewport3D:
                     size=6,
                 )
 
+    def _draw_closest_approach(self, view, proj):
+        if self._closest_approach_line is None:
+            return
+        pa, pb = self._closest_approach_line
+        pts = np.vstack([pa, pb])
+        sp = project_points(pts, view, proj, self.width, self.height)
+        if sp[0, 0] > -5000 and sp[1, 0] > -5000:
+            dpg.draw_line(
+                (float(sp[0, 0]), float(sp[0, 1])),
+                (float(sp[1, 0]), float(sp[1, 1])),
+                parent=self.tag,
+                color=(255, 255, 0, 200),
+                thickness=1.5,
+            )
+            # Distance label at midpoint
+            mx = (sp[0, 0] + sp[1, 0]) / 2
+            my = (sp[0, 1] + sp[1, 1]) / 2
+            dist = np.linalg.norm(pa - pb)
+            dpg.draw_text(
+                (float(mx) + 4, float(my) - 8),
+                f"{dist:.1f} km",
+                parent=self.tag,
+                color=(255, 255, 0, 200),
+                size=9,
+            )
+
     def _draw_satellite(self, view, proj):
         if self._trajectory is None:
             return
@@ -761,6 +977,29 @@ class Viewport3D:
             thickness=1,
         )
         dpg.draw_circle((cx, cy), 9, parent=self.tag, color=(255, 255, 0, 80), thickness=1)
+
+        # Draw markers for all multi-trajectory spacecraft
+        for orbit_pts, color, name in self._multi_trajectories:
+            # Find position at current time by index interpolation
+            if self._trajectory is not None and len(orbit_pts) > 1:
+                frac = self._current_time / max(self._trajectory.duration, 1.0)
+                idx = int(frac * (len(orbit_pts) - 1))
+                idx = max(0, min(idx, len(orbit_pts) - 1))
+                pos = orbit_pts[idx]
+                sp = project_points(pos.reshape(1, 3), view, proj, self.width, self.height)
+                if sp[0, 0] > -5000:
+                    sx, sy = float(sp[0, 0]), float(sp[0, 1])
+                    dpg.draw_circle(
+                        (sx, sy),
+                        4,
+                        parent=self.tag,
+                        color=color,
+                        fill=(*color[:3], 200),
+                        thickness=1,
+                    )
+                    dpg.draw_circle(
+                        (sx, sy), 7, parent=self.tag, color=(*color[:3], 60), thickness=1
+                    )
 
     def _draw_axes(self, view, proj):
         length = self._body_radius * 1.3

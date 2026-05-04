@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from simulator.core.bodies import CelestialBody
 from simulator.core.state import OrbitalElements, StateVector
 
@@ -31,3 +32,4 @@ class Scenario:
     rtol: float = 1e-10
     atol: float = 1e-12
     maneuvers: list[ManeuverEvent] = field(default_factory=list)
+    epoch: datetime = field(default_factory=lambda: datetime(2024, 1, 1, tzinfo=timezone.utc))

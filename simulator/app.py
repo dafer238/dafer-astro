@@ -23,6 +23,10 @@ from simulator.physics.maneuvers import hohmann_dv, bielliptic_dv, plane_change_
 from simulator.physics.perturbations import j2_raan_rate, j2_argp_rate
 from simulator.physics.propulsion import ENGINES, engine_mdot
 from simulator.core.conversions import coe_to_state
+from simulator.ui.interplanetary_tab import InterplanetaryTab
+from simulator.core.spacecraft import Spacecraft, MultiBodyTrajectory
+from simulator.sim.multibody import MultiBodyScenario, MultiBodyEngine
+from simulator.core.ephemeris import _PLANET_MU, _PLANET_RADIUS_KM
 
 
 class App:
@@ -45,6 +49,10 @@ class App:
         self._left_panel_width = 280
         self._right_panel_width = 300
         self._bottom_panel_height = 140
+        self._interplanetary_tab = InterplanetaryTab()
+        self._active_tab = "orbital"
+        self._tab1_spacecraft: list[dict] = []  # [{name, color, coe}]
+        self._tab1_multi_result: MultiBodyTrajectory | None = None
 
     def run(self):
         dpg.create_context()
@@ -77,15 +85,27 @@ class App:
             no_scrollbar=True,
             no_scroll_with_mouse=True,
         ):
-            with dpg.child_window(tag="top_panel", border=False):
-                with dpg.group(horizontal=True):
-                    self._build_left_panel()
-                    self._build_center_panel()
-                    self._build_right_panel()
+            with dpg.tab_bar(tag="main_tab_bar", callback=self._on_tab_change):
+                with dpg.tab(label="Orbital / Rendezvous", tag="tab_orbital"):
+                    with dpg.child_window(tag="top_panel", border=False):
+                        with dpg.group(horizontal=True):
+                            self._build_left_panel()
+                            self._build_center_panel()
+                            self._build_right_panel()
+                    self._build_bottom_panel()
 
-            self._build_bottom_panel()
+                with dpg.tab(label="Interplanetary / Multi-Body", tag="tab_interplanetary"):
+                    with dpg.child_window(tag="ipt_main_panel", border=False):
+                        self._interplanetary_tab.build("ipt_main_panel")
 
         dpg.set_primary_window("main_window", True)
+
+    def _on_tab_change(self, sender, app_data):
+        """Track which tab is active for frame updates."""
+        if app_data == dpg.get_item_children("main_tab_bar", 1)[0]:
+            self._active_tab = "orbital"
+        else:
+            self._active_tab = "interplanetary"
 
     def _build_left_panel(self):
         with dpg.child_window(width=260, tag="left_panel"):
@@ -102,6 +122,47 @@ class App:
                 dpg.add_button(label="HEO", callback=self._preset_heo, width=55)
 
             dpg.add_spacer(height=6)
+            dpg.add_text("Central Body:", color=(150, 150, 150))
+            dpg.add_combo(
+                ["Earth", "Moon", "Mars", "Sun", "Jupiter"],
+                default_value="Earth",
+                tag="central_body_select",
+                width=140,
+            )
+
+            dpg.add_spacer(height=6)
+            dpg.add_text("SPACECRAFT", color=(0, 255, 200))
+            dpg.add_separator()
+            dpg.add_input_text(label="Name", tag="sc_name_input", default_value="SC-1", width=100)
+            dpg.add_combo(
+                ["Cyan", "Green", "Red", "Yellow", "Orange", "Purple", "White"],
+                default_value="Cyan",
+                tag="sc_color_input",
+                width=100,
+            )
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Add SC", callback=self._add_sc_tab1, width=70)
+                dpg.add_button(label="Update SC", callback=self._update_sc_tab1, width=75)
+                dpg.add_button(label="Clear SCs", callback=self._clear_sc_tab1, width=70)
+            dpg.add_combo(
+                [],
+                default_value="",
+                tag="active_sc_select",
+                width=140,
+                label="Active SC",
+                callback=self._on_active_sc_change,
+            )
+            dpg.add_input_text(
+                tag="sc_list_display",
+                multiline=True,
+                readonly=True,
+                height=55,
+                width=-1,
+                default_value="Default single spacecraft.",
+            )
+            dpg.add_text("", tag="closest_approach_text", color=(255, 200, 80), wrap=240)
+
+            dpg.add_spacer(height=6)
             dpg.add_text("Classical Orbital Elements:", color=(150, 150, 150))
 
             dpg.add_input_float(
@@ -111,9 +172,16 @@ class App:
                 width=140,
                 step=10.0,
                 format="%.1f",
+                callback=self._on_coe_change,
             )
             dpg.add_input_float(
-                label="e", tag="coe_e", default_value=0.0001, width=140, step=0.001, format="%.5f"
+                label="e",
+                tag="coe_e",
+                default_value=0.0001,
+                width=140,
+                step=0.001,
+                format="%.5f",
+                callback=self._on_coe_change,
             )
             dpg.add_slider_float(
                 label="i (deg)",
@@ -123,6 +191,7 @@ class App:
                 max_value=180.0,
                 width=140,
                 format="%.2f",
+                callback=self._on_coe_change,
             )
             dpg.add_slider_float(
                 label="RAAN (deg)",
@@ -132,6 +201,7 @@ class App:
                 max_value=360.0,
                 width=140,
                 format="%.2f",
+                callback=self._on_coe_change,
             )
             dpg.add_slider_float(
                 label="omega (deg)",
@@ -141,6 +211,7 @@ class App:
                 max_value=360.0,
                 width=140,
                 format="%.2f",
+                callback=self._on_coe_change,
             )
             dpg.add_slider_float(
                 label="theta (deg)",
@@ -150,6 +221,7 @@ class App:
                 max_value=360.0,
                 width=140,
                 format="%.2f",
+                callback=self._on_coe_change,
             )
 
             dpg.add_spacer(height=4)
@@ -176,6 +248,8 @@ class App:
 
             dpg.add_checkbox(label="J2 oblateness", tag="pert_j2", default_value=True)
             dpg.add_checkbox(label="Atmospheric drag", tag="pert_drag", default_value=False)
+            dpg.add_checkbox(label="Moon gravity", tag="pert_moon", default_value=False)
+            dpg.add_checkbox(label="Sun gravity", tag="pert_sun", default_value=False)
             dpg.add_slider_float(
                 label="Cd",
                 tag="drag_cd",
@@ -239,7 +313,7 @@ class App:
                 default_value=25.0,
                 width=170,
                 format="%.1f",
-                callback=self._update_burn_cursor,
+                callback=self._on_burn_param_change,
             )
             dpg.add_input_float(
                 label="dv (km/s)",
@@ -249,20 +323,21 @@ class App:
                 width=170,
                 step=0.01,
                 format="%.3f",
+                callback=self._on_burn_param_change,
             )
             dpg.add_combo(
                 ["Percent", "Periapsis", "Apoapsis", "Ascending Node", "Descending Node"],
                 default_value="Percent",
                 tag="burn_anchor",
                 width=170,
-                callback=self._update_burn_cursor,
+                callback=self._on_burn_param_change,
             )
             dpg.add_combo(
                 ["prograde", "retrograde", "normal", "antinormal", "radial_out", "radial_in"],
                 default_value="prograde",
                 tag="burn_dir",
                 width=170,
-                callback=self._update_burn_cursor,
+                callback=self._on_burn_param_change,
             )
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Add Burn", callback=self._add_burn, width=80)
@@ -340,7 +415,18 @@ class App:
                     format="%.3f",
                 )
                 dpg.add_combo(
-                    ["1x", "5x", "10x", "50x", "100x", "500x", "1000x"],
+                    [
+                        "1x",
+                        "5x",
+                        "10x",
+                        "50x",
+                        "100x",
+                        "500x",
+                        "1000x",
+                        "5000x",
+                        "10000x",
+                        "50000x",
+                    ],
                     default_value="10x",
                     tag="speed_combo",
                     callback=self._on_speed_change,
@@ -461,7 +547,12 @@ class App:
             result = self.engine.result
             if result is not None:
                 self.trajectory = result
-                self.viewport3d.set_trajectory(result)
+                self.viewport3d.set_trajectory(
+                    result,
+                    self._get_central_body().radius,
+                    body_name=self._get_central_body().name,
+                    body_color=self._get_body_color(self._get_central_body().name),
+                )
                 self.viewport3d.clear_transfers()
                 burn_events = self.engine.burn_events
                 if len(burn_events) > 0:
@@ -482,11 +573,14 @@ class App:
                     )
                 self._log(f"Done: {result.n_points} points, duration={result.duration:.1f}s")
                 dpg.configure_item("time_slider", max_value=result.duration)
+                # Now compute closest approach (primary result is ready)
+                if self._tab1_multi_result is not None:
+                    self._compute_closest_approach_deferred()
             elif self.engine.error:
                 self._log(f"ERROR: {self.engine.error}")
 
         if self.playing and self.trajectory is not None:
-            self.current_time += dt_frame * self.play_speed * self.trajectory.duration / 30.0
+            self.current_time += dt_frame * self.play_speed
             if self.current_time > self.trajectory.t[-1]:
                 self.current_time = self.trajectory.t[0]
             dpg.set_value("time_slider", self.current_time)
@@ -496,6 +590,128 @@ class App:
 
         if self.viewport3d:
             self.viewport3d.render()
+
+        # Update interplanetary tab
+        self._interplanetary_tab.frame_update(dt_frame)
+
+    def _sc_color_name_to_rgb(self, name: str) -> tuple[int, int, int]:
+        mapping = {
+            "Cyan": (0, 191, 255),
+            "Green": (0, 255, 0),
+            "Red": (255, 80, 80),
+            "Yellow": (255, 255, 0),
+            "Orange": (255, 128, 0),
+            "Purple": (200, 80, 255),
+            "White": (255, 255, 255),
+        }
+        return mapping.get(name, (0, 191, 255))
+
+    def _add_sc_tab1(self):
+        name = dpg.get_value("sc_name_input")
+        color = self._sc_color_name_to_rgb(dpg.get_value("sc_color_input"))
+        a = dpg.get_value("coe_a")
+        e = dpg.get_value("coe_e")
+        i = dpg.get_value("coe_i")
+        raan = dpg.get_value("coe_raan")
+        omega = dpg.get_value("coe_omega")
+        theta = dpg.get_value("coe_theta")
+        coe = OrbitalElements(a=a, e=e, i=i, raan=raan, omega=omega, theta=theta)
+
+        # Check duplicate name
+        for sc in self._tab1_spacecraft:
+            if sc["name"] == name:
+                name = name + f"_{len(self._tab1_spacecraft) + 1}"
+                break
+
+        self._tab1_spacecraft.append({"name": name, "color": color, "coe": coe})
+        self._refresh_tab1_sc_list()
+        dpg.set_value("sc_name_input", f"SC-{len(self._tab1_spacecraft) + 1}")
+        self._log(f"Added spacecraft: {name}")
+
+    def _update_sc_tab1(self):
+        """Update the selected SC's COE from current slider values."""
+        name = dpg.get_value("active_sc_select")
+        if not name:
+            self._log("No SC selected to update.")
+            return
+        a = dpg.get_value("coe_a")
+        e = dpg.get_value("coe_e")
+        i = dpg.get_value("coe_i")
+        raan = dpg.get_value("coe_raan")
+        omega = dpg.get_value("coe_omega")
+        theta = dpg.get_value("coe_theta")
+        coe = OrbitalElements(a=a, e=e, i=i, raan=raan, omega=omega, theta=theta)
+        for sc in self._tab1_spacecraft:
+            if sc["name"] == name:
+                sc["coe"] = coe
+                break
+        self._refresh_tab1_sc_list()
+        self._log(f"Updated {name}: a={a:.0f} e={e:.4f}")
+
+    def _clear_sc_tab1(self):
+        self._tab1_spacecraft.clear()
+        self._tab1_multi_result = None
+        self._refresh_tab1_sc_list()
+        self.viewport3d.clear_multi_trajectories()
+        self._log("Cleared extra spacecraft.")
+
+    def _refresh_tab1_sc_list(self):
+        if not self._tab1_spacecraft:
+            dpg.set_value("sc_list_display", "Default single spacecraft.")
+            dpg.configure_item("active_sc_select", items=[], default_value="")
+            dpg.set_value("closest_approach_text", "")
+            return
+        lines = []
+        names = []
+        for i, sc in enumerate(self._tab1_spacecraft, 1):
+            coe = sc["coe"]
+            lines.append(f"{i}. {sc['name']} a={coe.a:.0f}")
+            names.append(sc["name"])
+        dpg.set_value("sc_list_display", "\n".join(lines))
+        dpg.configure_item("active_sc_select", items=names, default_value=names[0] if names else "")
+
+    def _on_active_sc_change(self, sender=None, app_data=None, user_data=None):
+        """When user selects a different SC, load its COE into the sliders."""
+        name = dpg.get_value("active_sc_select")
+        for sc in self._tab1_spacecraft:
+            if sc["name"] == name:
+                coe = sc["coe"]
+                dpg.set_value("coe_a", coe.a)
+                dpg.set_value("coe_e", coe.e)
+                dpg.set_value("coe_i", coe.i)
+                dpg.set_value("coe_raan", coe.raan)
+                dpg.set_value("coe_omega", coe.omega)
+                dpg.set_value("coe_theta", coe.theta)
+                self._on_coe_change()
+                break
+
+    def _get_central_body(self) -> CelestialBody:
+        """Get the selected central body."""
+        body_name = dpg.get_value("central_body_select")
+        if body_name == "Earth":
+            return CelestialBody.earth()
+        elif body_name == "Moon":
+            return CelestialBody.moon()
+        elif body_name == "Sun":
+            return CelestialBody.sun()
+        else:
+            # Generic body from ephemeris data
+            mu = _PLANET_MU.get(body_name, MU_EARTH)
+            radius = _PLANET_RADIUS_KM.get(body_name, R_EARTH)
+            return CelestialBody(name=body_name, mu=mu, radius=radius)
+
+    def _get_body_color(self, name: str) -> tuple[int, int, int]:
+        colors = {
+            "Earth": (28, 88, 170),
+            "Moon": (140, 140, 140),
+            "Mars": (180, 80, 50),
+            "Sun": (255, 200, 0),
+            "Jupiter": (180, 150, 100),
+            "Venus": (200, 180, 80),
+            "Saturn": (200, 180, 120),
+            "Mercury": (130, 130, 130),
+        }
+        return colors.get(name, (100, 100, 200))
 
     def _on_compute(self):
         a = dpg.get_value("coe_a")
@@ -518,11 +734,13 @@ class App:
             drag_enabled=dpg.get_value("pert_drag"),
             drag_cd=dpg.get_value("drag_cd"),
             drag_ballistic_coeff=dpg.get_value("drag_B"),
+            third_body_moon=dpg.get_value("pert_moon"),
+            third_body_sun=dpg.get_value("pert_sun"),
         )
 
         scenario = Scenario(
             initial_coe=coe,
-            central_body=CelestialBody.earth(),
+            central_body=self._get_central_body(),
             perturbations=pert,
             n_orbits=n_orb,
             maneuvers=self._build_absolute_maneuvers(a, n_orb),
@@ -533,7 +751,7 @@ class App:
         if compare_enabled and len(scenario.maneuvers) > 0:
             compare_scenario = Scenario(
                 initial_coe=coe,
-                central_body=CelestialBody.earth(),
+                central_body=self._get_central_body(),
                 perturbations=pert,
                 n_orbits=n_orb,
                 maneuvers=[],
@@ -547,17 +765,131 @@ class App:
         self.viewport3d.clear_preview_trajectory()
         self.viewport3d.clear_reference_trajectory()
         self.viewport3d.clear_burn_markers()
+        self.viewport3d.clear_multi_trajectories()
+        self._tab1_multi_result = None
         self._update_burn_events_display([])
         dpg.set_value("compare_text", "Compare mode idle.")
+        dpg.set_value("closest_approach_text", "")
         self.playing = False
         dpg.set_value("play_btn", "Play")
         self.engine.compute(scenario)
         if compare_scenario is not None:
             self.compare_engine.compute(compare_scenario)
             self._log("Computing baseline no-burn trajectory for comparison...")
+
+        # Compute additional spacecraft trajectories
+        if self._tab1_spacecraft:
+            self._compute_additional_spacecraft(scenario)
+
         self._log(
             f"Computing: a={a:.1f} e={e:.4f} i={i:.1f} n={n_orb:.0f} orbits, burns={len(scenario.maneuvers)}"
         )
+
+    def _compute_additional_spacecraft(self, primary_scenario: Scenario):
+        """Compute trajectories for additional spacecraft and display them."""
+        from datetime import datetime, timezone
+
+        central = self._get_central_body()
+        # Use duration that covers all SC orbits
+        T_primary = orbital_period(primary_scenario.initial_coe.a, central.mu)
+        max_T = T_primary
+        for sc_data in self._tab1_spacecraft:
+            T_sc = orbital_period(sc_data["coe"].a, central.mu)
+            if T_sc > max_T:
+                max_T = T_sc
+        duration = max_T * primary_scenario.n_orbits
+
+        # Build perturbing bodies
+        perturbers = []
+        cfg = primary_scenario.perturbations
+        if cfg.third_body_moon:
+            perturbers.append("Moon")
+        if cfg.third_body_sun:
+            perturbers.append("Sun")
+
+        spacecraft = []
+        for sc_data in self._tab1_spacecraft:
+            spacecraft.append(
+                Spacecraft(
+                    name=sc_data["name"],
+                    color=sc_data["color"],
+                    initial_coe=sc_data["coe"],
+                )
+            )
+
+        epoch = getattr(primary_scenario, "epoch", datetime(2024, 1, 1, tzinfo=timezone.utc))
+        scenario = MultiBodyScenario(
+            spacecraft=spacecraft,
+            central_body=central.name,
+            perturbing_bodies=perturbers,
+            epoch=epoch,
+            duration_seconds=duration,
+            perturbations=cfg,
+        )
+
+        engine = MultiBodyEngine()
+        result = engine.compute(scenario)
+        if result is None:
+            self._log(f"Additional SC error: {engine.error}")
+            return
+
+        self._tab1_multi_result = result
+
+        # Set multi trajectories on viewport
+        trajs = []
+        for sc_name, sc_color in zip(result.spacecraft_names, result.spacecraft_colors):
+            traj = result.get_trajectory(sc_name)
+            trajs.append((traj, sc_color, sc_name))
+        self.viewport3d.set_multi_trajectories(trajs)
+
+        # Compute closest approach between primary and each additional SC
+        self._compute_closest_approach(primary_scenario)
+        self._log(f"Computed {len(spacecraft)} additional spacecraft.")
+
+    def _compute_closest_approach_deferred(self):
+        """Compute closest approach after primary result is ready."""
+        self._compute_closest_approach(None)
+
+    def _compute_closest_approach(self, primary_scenario=None):
+        """Compute closest approach between primary SC and additional ones."""
+        if self._tab1_multi_result is None or self.trajectory is None:
+            return
+
+        primary_result = self.trajectory
+
+        lines = []
+        best_dist = np.inf
+        best_pa = None
+        best_pb = None
+        for sc_name in self._tab1_multi_result.spacecraft_names:
+            other_traj = self._tab1_multi_result.get_trajectory(sc_name)
+            # Find overlapping time range
+            t_max = min(primary_result.t[-1], other_traj.t[-1])
+            t_samples = np.linspace(0, t_max, min(2000, len(primary_result.t)))
+            min_dist = np.inf
+            min_t = 0.0
+            min_r1 = None
+            min_r2 = None
+            for t in t_samples:
+                r1, _ = primary_result.interpolate(t)
+                r2, _ = other_traj.interpolate(t)
+                d = np.linalg.norm(r1 - r2)
+                if d < min_dist:
+                    min_dist = d
+                    min_t = t
+                    min_r1 = r1.copy()
+                    min_r2 = r2.copy()
+            lines.append(f"Closest to {sc_name}: {min_dist:.2f} km @ t={min_t:.0f}s")
+            if min_dist < best_dist:
+                best_dist = min_dist
+                best_pa = min_r1
+                best_pb = min_r2
+
+        dpg.set_value("closest_approach_text", "\n".join(lines))
+
+        # Draw closest approach line on viewport
+        if best_pa is not None and best_pb is not None:
+            self.viewport3d.set_closest_approach_line(best_pa, best_pb)
 
     def _update_layout(self):
         vw = max(640, dpg.get_viewport_client_width())
@@ -630,18 +962,62 @@ class App:
             "100x": 100,
             "500x": 500,
             "1000x": 1000,
+            "5000x": 5000,
+            "10000x": 10000,
+            "50000x": 50000,
         }
         self.play_speed = speed_map.get(app_data, 10)
+
+    def _on_coe_change(self, sender=None, app_data=None, user_data=None):
+        """Live preview: compute analytical orbit from current COE sliders."""
+        try:
+            a = dpg.get_value("coe_a")
+            e = dpg.get_value("coe_e")
+            i_deg = dpg.get_value("coe_i")
+            raan_deg = dpg.get_value("coe_raan")
+            omega_deg = dpg.get_value("coe_omega")
+            if a <= 0 or e < 0 or e >= 1.0:
+                self.viewport3d.clear_preview_orbit()
+                return
+            body = self._get_central_body()
+            # Generate points around the orbit analytically
+            thetas = np.linspace(0, 2 * np.pi, 200)
+            i = np.radians(i_deg)
+            raan = np.radians(raan_deg)
+            omega = np.radians(omega_deg)
+            p = a * (1 - e**2)
+            positions = []
+            for th in thetas:
+                r_mag = p / (1 + e * np.cos(th))
+                # Perifocal coords
+                x_pf = r_mag * np.cos(th)
+                y_pf = r_mag * np.sin(th)
+                # Rotation to inertial
+                cos_O, sin_O = np.cos(raan), np.sin(raan)
+                cos_i, sin_i = np.cos(i), np.sin(i)
+                cos_w, sin_w = np.cos(omega), np.sin(omega)
+                x = (cos_O * cos_w - sin_O * sin_w * cos_i) * x_pf + (
+                    -cos_O * sin_w - sin_O * cos_w * cos_i
+                ) * y_pf
+                y = (sin_O * cos_w + cos_O * sin_w * cos_i) * x_pf + (
+                    -sin_O * sin_w + cos_O * cos_w * cos_i
+                ) * y_pf
+                z = (sin_w * sin_i) * x_pf + (cos_w * sin_i) * y_pf
+                positions.append([x, y, z])
+            self.viewport3d.set_preview_orbit(np.array(positions), color=(100, 255, 100))
+        except Exception:
+            self.viewport3d.clear_preview_orbit()
 
     def _update_telemetry(self):
         if self.trajectory is None:
             return
         r, v = self.trajectory.interpolate(self.current_time)
-        alt = np.linalg.norm(r) - R_EARTH
+        body = self._get_central_body()
+        alt = np.linalg.norm(r) - body.radius
         vel = np.linalg.norm(v)
-        eps = specific_energy(r, v, MU_EARTH)
-        coe = state_to_coe(StateVector(r=r, v=v))
-        T = orbital_period(coe.a, MU_EARTH)
+        eps = specific_energy(r, v, body.mu)
+        coe = state_to_coe(StateVector(r=r, v=v), body.mu)
+        T = orbital_period(coe.a, body.mu)
 
         dpg.set_value("tel_alt", f"{alt:.2f} km")
         dpg.set_value("tel_vel", f"{vel:.4f} km/s")
@@ -920,6 +1296,28 @@ class App:
         desired_duration = max(total_duration, max_time + 2.5 * post_period)
         return max(n_orbits, desired_duration / orbit_time)
 
+    def _on_burn_param_change(self, sender=None, app_data=None, user_data=None):
+        """Live update: show preview of current burn params without committing."""
+        self._update_burn_cursor()
+        # Build a temporary maneuver plan with current slider values + existing burns
+        dv = float(dpg.get_value("burn_dv"))
+        if dv <= 0.0:
+            # No burn to preview, just show existing plan
+            if self._maneuver_plan:
+                self._request_maneuver_preview()
+            return
+        t_pct = float(dpg.get_value("burn_time_pct"))
+        direction = str(dpg.get_value("burn_dir"))
+        anchor = str(dpg.get_value("burn_anchor"))
+        t_frac = t_pct / 100.0 if anchor == "Percent" else self._burn_time_from_anchor(anchor)
+
+        # Temporarily add this burn to the plan for preview
+        temp_event = ManeuverEvent(time=t_frac, dv_magnitude=dv, direction=direction)
+        original_plan = self._maneuver_plan.copy()
+        self._maneuver_plan = sorted(original_plan + [temp_event], key=lambda e: e.time)
+        self._request_maneuver_preview()
+        self._maneuver_plan = original_plan
+
     def _request_maneuver_preview(self):
         if self.viewport3d is None:
             return
@@ -946,10 +1344,12 @@ class App:
             drag_enabled=dpg.get_value("pert_drag"),
             drag_cd=dpg.get_value("drag_cd"),
             drag_ballistic_coeff=dpg.get_value("drag_B"),
+            third_body_moon=dpg.get_value("pert_moon"),
+            third_body_sun=dpg.get_value("pert_sun"),
         )
         scenario = Scenario(
             initial_coe=coe,
-            central_body=CelestialBody.earth(),
+            central_body=self._get_central_body(),
             perturbations=pert,
             n_orbits=n_orb,
             maneuvers=self._build_absolute_maneuvers(a, n_orb),

@@ -3,7 +3,7 @@ from typing import Callable
 import numpy as np
 from simulator.core.constants import MU_EARTH
 from simulator.core.bodies import CelestialBody
-from simulator.physics.perturbations import j2_accel, drag_accel
+from simulator.physics.perturbations import j2_accel, drag_accel, third_body_accel
 
 
 class EOMBuilder:
@@ -25,6 +25,24 @@ class EOMBuilder:
         def _drag(t, r, v):
             return drag_accel(r, v, Cd, B)
         self._perturbations.append(_drag)
+        return self
+
+    def add_third_body_ephemeris(
+        self, body_name: str, central_body_name: str, epoch_jd: float
+    ) -> EOMBuilder:
+        """Add third-body perturbation using real ephemeris positions."""
+        from simulator.core.ephemeris import planet_ecliptic_position, _PLANET_MU
+
+        mu_body = _PLANET_MU[body_name]
+
+        def _third_body(t, r, v):
+            jd_now = epoch_jd + t / 86400.0
+            central_helio = planet_ecliptic_position(central_body_name, jd_now)
+            body_helio = planet_ecliptic_position(body_name, jd_now)
+            r_body = body_helio - central_helio
+            return third_body_accel(r, r_body, mu_body)
+
+        self._perturbations.append(_third_body)
         return self
 
     def build(self) -> Callable[[float, np.ndarray], np.ndarray]:
