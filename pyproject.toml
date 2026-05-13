@@ -1,0 +1,7 @@
+[project]
+name = "dafer-astro"
+version = "0.1.0"
+description = "Astrodynamic related tools and materials."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = []
