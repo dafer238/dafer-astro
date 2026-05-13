@@ -1,5 +1,5 @@
-dearpygui>=2.3.1
-numpy>=2.4.4
-scipy>=1.17.1
-pandas>=3.0.2
-matplotlib>=3.10.9
+dearpygui
+numpy
+scipy
+pandas
+matplotlib
