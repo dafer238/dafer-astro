@@ -17,7 +17,7 @@ target_star:
 camera:
   crop_factor: 1.5 # APS-C = 1.5, Full Frame = 1.0, Micro 4/3 = 2.0
   pixel_pitch_um: 3.9 # Pixel pitch in micrometers (e.g., Sony APS-C ~ 3.9)
-  aperture: 2.8 # Lens aperture (f-number) for NPF rule
+  aperture: 3.5 # Lens aperture (f-number) for NPF rule
 
 # Focal length range for exposure calculation
 focal_lengths:
