@@ -1,0 +1,51 @@
+# Equatorial Tracker Configuration
+# ==================================
+
+# Observer location
+observer:
+  latitude: 43.357138 # degrees (Bilbao, Spain)
+  longitude: -2.976366 # degrees
+  elevation: 39 # meters above sea level
+
+# Target star for polar alignment (Polaris)
+target_star:
+  name: "Polaris"
+  ra: 37.95 # Right Ascension in degrees
+  dec: 89.26 # Declination in degrees
+
+# Camera / DSLR settings
+camera:
+  crop_factor: 1.5 # APS-C = 1.5, Full Frame = 1.0, Micro 4/3 = 2.0
+  pixel_pitch_um: 3.9 # Pixel pitch in micrometers (e.g., Sony APS-C ~ 3.9)
+  aperture: 2.8 # Lens aperture (f-number) for NPF rule
+
+# Focal length range for exposure calculation
+focal_lengths:
+  min_mm: 15 # Minimum focal length in mm
+  max_mm: 300 # Maximum focal length in mm
+  step_mm: 5 # Step between focal lengths
+
+# Magnetic declination
+magnetic_declination:
+  mode: "auto" # "auto" (calculate from location) or "manual"
+  manual_value_deg: 0.0 # Used only if mode is "manual" (East positive)
+
+# Alignment error simulation
+alignment_simulation:
+  misalignment_alt_arcsec: 60 # Altitude misalignment in arcseconds (1 arcmin)
+  misalignment_az_arcsec: 60 # Azimuth misalignment in arcseconds (1 arcmin)
+  target_declination_deg: 45.0 # Declination of imaging target for drift simulation
+  simulation_duration_sec: 300 # Duration of drift simulation (seconds)
+  time_step_sec: 1.0 # Time step for simulation
+
+# Servo / tracking export settings
+servo:
+  duration_sec: 3600 # Total tracking duration (seconds)
+  time_step_sec: 0.5 # Time step for servo commands (seconds)
+  output_format: "json" # "json" or "csv"
+  output_directory: "./output" # Directory for exported files
+
+# GUI settings
+gui:
+  theme: "default" # GUI color theme
+  auto_refresh: true # Auto-refresh calculations on parameter change
